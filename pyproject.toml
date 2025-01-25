@@ -1,0 +1,14 @@
+[project]
+name = "ComfyLatentTools"
+description = "A set of tools for manipulating latent tensors in ComfyUI"
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+dependencies = ["torch", "torchvision", "pillow", "numpy"]
+
+[project.urls]
+Repository = "https://github.com/JTriggerFish/ComfyLatentTools"
+
+[tool.comfy]
+PublisherId = "JTriggerFish"
+DisplayName = "Comfy Latent Tools"
+Icon = ""
