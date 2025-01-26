@@ -101,7 +101,7 @@ def moment_match(
         to_std = to_tensor.std()
         return (to_tensor + to_mean - from_mean) * to_std / from_std
     else:
-        ret = from_tensor.clone()
+        ret = to_tensor.clone()
         ret += from_tensor.mean(dim=(2, 3), keepdim=True) - ret.mean(
             dim=(2, 3), keepdim=True
         )
@@ -138,7 +138,7 @@ def add_correlated_gaussian_noise(
     noise = torch.randn_like(latent)  # same shape, ~N(0,1)
 
     # base size based on sigma
-    kernel_size = min(2 * np.ceil(3 * sigma) + 1, max_kernel_size)
+    kernel_size = int(min(2 * np.ceil(3 * sigma) + 1, max_kernel_size))
 
     # 2) Build a 2D Gaussian kernel
     #    We'll define an inline helper to create a normalized 2D kernel.

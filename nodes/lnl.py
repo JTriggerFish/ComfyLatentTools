@@ -16,7 +16,7 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 2.0, "min": 0.1, "max": 4.0, "step": 0.5},
                 ),
-                "soft_clamp_outliers": (["enable", "disable"],),
+                "soft_clamp_outliers": (["enable", "disable"], {"default": "enable"}),
                 "outlier_quantile": (
                     "FLOAT",
                     {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.01},
@@ -25,14 +25,14 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.1},
                 ),
-                "add_latent_noise": (["enable", "disable"],),
+                "add_latent_noise": (["enable", "disable"], {"default": "disable"}),
                 "latent_noise_std": (
                     "FLOAT",
-                    {"default": 0.1, "min": 0.0, "max": 10.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01},
                 ),
                 "latent_noise_scale": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0},
+                    {"default": 0.1, "min": 0.01, "max": 10.0},
                 ),
             },
         }
@@ -66,7 +66,7 @@ class LatentNormalizedLanczosResize:
         latent,
         vae,
         size_multiplier: float = 2.0,
-        soft_clamp_outliers: str = "disable",
+        soft_clamp_outliers: str = "enable",
         outlier_quantile: float = 0.01,
         outlier_clamp_slope: float = 0.1,
         add_latent_noise: str = "disable",
@@ -75,8 +75,16 @@ class LatentNormalizedLanczosResize:
     ):
         samples = latent["samples"]
 
-        soft_clamp_outliers = soft_clamp_outliers == "enable"
-        add_latent_noise = add_latent_noise == "enable"
+        soft_clamp_outliers = (
+            (soft_clamp_outliers == "enable")
+            if isinstance(soft_clamp_outliers, str)
+            else soft_clamp_outliers
+        )
+        add_latent_noise = (
+            (add_latent_noise == "enable")
+            if isinstance(add_latent_noise, str)
+            else add_latent_noise
+        )
 
         if soft_clamp_outliers:
             samples = lf.huberize_quantile(
@@ -85,8 +93,8 @@ class LatentNormalizedLanczosResize:
 
         image = vae.decode(samples)
 
-        width = round(samples.shape[3] * size_multiplier)
-        height = round(samples.shape[2] * size_multiplier)
+        width = round(image.shape[2] * size_multiplier)
+        height = round(image.shape[1] * size_multiplier)
         image_upscaled = comfy.utils.common_upscale(
             image.movedim(-1, 1),
             width,
@@ -103,7 +111,7 @@ class LatentNormalizedLanczosResize:
                 matched_latent, latent_noise_scale, latent_noise_std
             )
 
-        return (matched_latent,)
+        return ({"samples": matched_latent},)
 
 
 NODE_CLASS_MAPPINGS = {
