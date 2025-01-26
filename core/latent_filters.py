@@ -165,3 +165,18 @@ def add_correlated_gaussian_noise(
     # 4) Scale and add to the original latent
     correlated_noise = amplitude * correlated_noise
     return latent + correlated_noise
+
+
+def latent_upscale(
+    latent: torch.Tensor,
+    new_height: int,
+    new_width: int,
+    mode: transforms.InterpolationMode = transforms.InterpolationMode.NEAREST_EXACT,
+) -> torch.Tensor:
+    upscale = transforms.Resize(
+        (new_height, new_width), transforms.InterpolationMode.NEAREST_EXACT
+    )
+
+    # Upscale each channel separately
+    res = upscale(latent)
+    return res

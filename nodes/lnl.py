@@ -34,6 +34,10 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 0.1, "min": 0.01, "max": 10.0},
                 ),
+                "add_latent_upscale_with_weight": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
             },
         }
 
@@ -49,18 +53,6 @@ class LatentNormalizedLanczosResize:
             "of the input latent, optionally adding noise."
         )
 
-    def upscale(
-        self, image: "torch.Tensor", upscale_method: str, scale_by
-    ) -> "torch.Tensor":
-        samples = image.movedim(-1, 1)
-        width = round(samples.shape[3] * scale_by)
-        height = round(samples.shape[2] * scale_by)
-        s = comfy.utils.common_upscale(
-            samples, width, height, upscale_method, "disabled"
-        )
-        s = s.movedim(1, -1)
-        return (s,)
-
     def transform(
         self,
         latent,
@@ -72,6 +64,7 @@ class LatentNormalizedLanczosResize:
         add_latent_noise: str = "disable",
         latent_noise_std: float = 0.1,
         latent_noise_scale: float = 1.0,
+        add_latent_upscale_with_weight: float = 0.0,
     ):
         samples = latent["samples"]
 
@@ -104,6 +97,12 @@ class LatentNormalizedLanczosResize:
         ).movedim(1, -1)
 
         latent_of_upscaled = vae.encode(image_upscaled)
+        if add_latent_upscale_with_weight > 0.0:
+            a = add_latent_upscale_with_weight
+            h, w = latent_of_upscaled.shape[2:]
+            up_latent = lf.latent_upscale(samples, h, w)
+            latent_of_upscaled = (1 - a) * latent_of_upscaled + a * up_latent
+
         matched_latent = lf.moment_match(samples, latent_of_upscaled)
 
         if add_latent_noise:
