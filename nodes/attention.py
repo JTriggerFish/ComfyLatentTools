@@ -74,7 +74,7 @@ class RescaledPAG:
                 "pag_weight": (
                     "FLOAT",
                     {
-                        "default": 1.5,
+                        "default": 2.0,
                         "min": 0.0,
                         "max": 100.0,
                         "step": 0.1,
@@ -85,7 +85,7 @@ class RescaledPAG:
                 "rescaling_fraction": (
                     "FLOAT",
                     {
-                        "default": 0.9,
+                        "default": 0.7,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
@@ -132,7 +132,7 @@ class RescaledPAG:
     def patch(
         self,
         model: ModelPatcher,
-        pag_weight: float = 3.0,
+        pag_weight: float = 2.0,
         apply_rescaling_to_pag: bool = True,
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
@@ -210,7 +210,7 @@ class RescaledSEG:
                 "seg_sigma": (
                     "FLOAT",
                     {
-                        "default": 30.0,
+                        "default": 1000.0,
                         "min": 0.0,
                         "max": 9999.0,
                         "step": 5.0,
@@ -227,11 +227,11 @@ class RescaledSEG:
                         "round": 0.01,
                     },
                 ),
-                "apply_rescaling_to_seg": ("BOOLEAN", {"default": True}),
+                "apply_rescaling_to_seg": ("BOOLEAN", {"default": False}),
                 "rescaling_fraction": (
                     "FLOAT",
                     {
-                        "default": 0.9,
+                        "default": 0.7,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
@@ -278,8 +278,8 @@ class RescaledSEG:
     def patch(
         self,
         model: ModelPatcher,
-        seg_sigma: float = 30.0,
-        seg_weight: float = 3.0,
+        seg_sigma: float = 1000.0,
+        seg_weight: float = 1.5,
         apply_rescaling_to_seg: bool = True,
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
@@ -302,10 +302,6 @@ class RescaledSEG:
 
             noise_fracs = model_options["transformer_options"]["sample_sigmas"] ** 2
             current_frac = sigma**2 / noise_fracs[0]
-
-            alpha = 1 / (sigma**2 + 1.0) ** 0.5
-            sigma = sigma / (sigma**2 + 1.0) ** 0.5
-            sigma_inv = 1.0 / sigma
 
             if (noise_fraction_end <= current_frac) and (
                 current_frac <= noise_fraction_start
