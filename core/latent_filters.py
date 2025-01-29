@@ -4,7 +4,6 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import functional as F
 

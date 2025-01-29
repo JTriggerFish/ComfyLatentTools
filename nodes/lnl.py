@@ -16,7 +16,7 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 2.0, "min": 0.1, "max": 4.0, "step": 0.5},
                 ),
-                "soft_clamp_outliers": (["enable", "disable"], {"default": "enable"}),
+                "soft_clamp_outliers": ("BOOLEAN", {"default": True}),
                 "outlier_quantile": (
                     "FLOAT",
                     {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.01},
@@ -25,7 +25,7 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.1},
                 ),
-                "add_latent_noise": (["enable", "disable"], {"default": "disable"}),
+                "add_latent_noise": ("BOOLEAN", {"default": False}),
                 "latent_noise_std": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01},
@@ -58,26 +58,15 @@ class LatentNormalizedLanczosResize:
         latent,
         vae,
         size_multiplier: float = 2.0,
-        soft_clamp_outliers: str = "enable",
+        soft_clamp_outliers: bool = True,
         outlier_quantile: float = 0.01,
         outlier_clamp_slope: float = 0.1,
-        add_latent_noise: str = "disable",
+        add_latent_noise: bool = False,
         latent_noise_std: float = 0.1,
         latent_noise_scale: float = 1.0,
         add_latent_upscale_with_weight: float = 0.0,
     ):
         samples = latent["samples"]
-
-        soft_clamp_outliers = (
-            (soft_clamp_outliers == "enable")
-            if isinstance(soft_clamp_outliers, str)
-            else soft_clamp_outliers
-        )
-        add_latent_noise = (
-            (add_latent_noise == "enable")
-            if isinstance(add_latent_noise, str)
-            else add_latent_noise
-        )
 
         if soft_clamp_outliers:
             samples = lf.huberize_quantile(

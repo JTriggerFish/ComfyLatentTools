@@ -3,7 +3,7 @@ from typing import Callable
 from torch import Tensor
 from itertools import groupby
 
-from latent_filters import gaussian_blur_2d
+from .latent_filters import gaussian_blur_2d
 
 
 def pag_perturbed_attention(

@@ -2,10 +2,66 @@ import torch
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
 from comfy.ldm.modules.attention import optimized_attention
-from unet import parse_unet_blocks, pag_perturbed_attention, seg_attention_wrapper
+from ..core import unet as unet
 
 
 # import torch
+def compute_v_space_normalised_combination(
+    x: torch.Tensor,
+    sigma_: float,
+    cond_x: torch.Tensor,
+    uncond_x: torch.Tensor,
+    cond_scale: float,
+    alternate_cond_x: torch.Tensor,
+    alternate_weight: float,
+    normalised_fraction: float,
+    apply_rescaling_to_alternate: bool,
+) -> torch.Tensor:
+    """
+    Convert from x_0 prediction space to v prediction space and combine
+    with partial rescaling
+
+    """
+    # Reshape to match the dimensions of the input tensor
+    sigma = sigma_.view(sigma_.shape[:1] + (1,) * (cond_x.ndim - 1))
+
+    # Convert to variance preserving space
+    alpha = 1 / (sigma**2 + 1.0) ** 0.5
+    sigma = sigma * alpha
+    sigma_inv = 1.0 / sigma
+    x = x * alpha
+
+    cond_v = (alpha * x - cond_x) * sigma_inv
+    uncond_v = (alpha * x - uncond_x) * sigma_inv
+
+    s0: torch.Tensor = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
+    if apply_rescaling_to_alternate:
+        alternate_cond_v = (alpha * x - alternate_cond_x) * sigma_inv
+        v_out_unnorm: torch.Tensor = (
+            uncond_v
+            + cond_scale * (cond_v - uncond_v)
+            - alternate_weight * (alternate_cond_v - cond_v)
+        )
+        s1: torch.Tensor = torch.std(v_out_unnorm, dim=(1, 2, 3), keepdim=True)
+        v_out_normed: torch.Tensor = v_out_unnorm * s0 / s1
+        v_final: torch.Tensor = v_out_normed * normalised_fraction + v_out_unnorm * (
+            1 - normalised_fraction
+        )
+        # Convert back to prediction space and rescale
+        # pred_final = (alpha * x - v_final * sigma) / alpha
+        pred_final = x * alpha - v_final * sigma
+    else:
+        # Apply standard CFG rescaling and combine with alternate
+        v_cfg_unnorm: torch.Tensor = uncond_v + cond_scale * (cond_v - uncond_v)
+        s1: torch.Tensor = torch.std(v_cfg_unnorm, dim=(1, 2, 3), keepdim=True)
+        v_cfg_normed: torch.Tensor = v_cfg_unnorm * s0 / s1
+        v_cfg: torch.Tensor = v_cfg_normed * normalised_fraction + v_cfg_unnorm * (
+            1 - normalised_fraction
+        )
+        pred_cfg = x * alpha - v_cfg * sigma
+        pred_final = pred_cfg - alternate_weight * (alternate_cond_x - cond_x)
+
+    return pred_final
 
 
 class RescaledPAG:
@@ -25,6 +81,7 @@ class RescaledPAG:
                         "round": 0.01,
                     },
                 ),
+                "apply_rescaling_to_pag": ("BOOLEAN", {"default": True}),
                 "rescaling_fraction": (
                     "FLOAT",
                     {
@@ -76,6 +133,7 @@ class RescaledPAG:
         self,
         model: ModelPatcher,
         pag_weight: float = 3.0,
+        apply_rescaling_to_pag: bool = True,
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
         unet_block_id: int = 0,
@@ -83,17 +141,6 @@ class RescaledPAG:
         noise_fraction_end: float = 0.0,
         unet_block_list: str = "",
     ):
-        """
-        :param model:
-        :param pag_weight:
-        :param rescaling_fraction:
-        :param unet_block:
-        :param unet_block_id:
-        :param noise_fraction_start:
-        :param noise_fraction_end:
-        :param unet_block_list:
-        :return:
-        """
 
         def cfg_function(args):
             """Rescaled CFG+PAG"""
@@ -102,26 +149,18 @@ class RescaledPAG:
             uncond_pred = args["uncond_denoised"]
             cond_scale = args["cond_scale"]
             cond = args["cond"]
-            sigma_ = args["sigma"]
+            sigma = args["sigma"]
             model_options = args["model_options"].copy()
-            sigma = sigma_.view(sigma_.shape[:1] + (1,) * (cond_pred.ndim - 1))
             x = args["input"]
 
             noise_fracs = model_options["transformer_options"]["sample_sigmas"] ** 2
-            current_frac = sigma_**2 / noise_fracs[0]
-
-            alpha = 1 / (sigma**2 + 1.0) ** 0.5
-            sigma = sigma / (sigma**2 + 1.0) ** 0.5
-            sigma_inv = 1.0 / sigma
-
-            cond_v = (alpha * x - cond_pred) * sigma_inv
-            uncond_v = (alpha * x - uncond_pred) * sigma_inv
+            current_frac = sigma**2 / noise_fracs[0]
 
             if (noise_fraction_end <= current_frac) and (
                 current_frac <= noise_fraction_start
             ):
                 if unet_block_list:
-                    blocks = parse_unet_blocks(model, unet_block_list)
+                    blocks = unet.parse_unet_blocks(model, unet_block_list)
                 else:
                     blocks = [(unet_block, unet_block_id, None)]
 
@@ -129,7 +168,7 @@ class RescaledPAG:
                     layer, number, index = block
                     model_options = set_model_options_patch_replace(
                         model_options,
-                        pag_perturbed_attention,
+                        unet.pag_perturbed_attention,
                         "attn1",
                         layer,
                         number,
@@ -137,26 +176,23 @@ class RescaledPAG:
                     )
 
                 (pag_cond_pred,) = calc_cond_batch(
-                    model, [cond], x, sigma_, model_options
+                    model, [cond], x, sigma, model_options
                 )
-                pag_cond_v = (alpha * x - pag_cond_pred) * sigma_inv
             else:
-                pag_cond_v = cond_v
+                pag_cond_pred = cond_pred
 
-            v_out_unnorm = (
-                uncond_v
-                + cond_scale * (cond_v - uncond_v)
-                - pag_weight * (pag_cond_v - cond_v)
+            pred_final = compute_v_space_normalised_combination(
+                x,
+                sigma,
+                cond_pred,
+                uncond_pred,
+                cond_scale,
+                pag_cond_pred,
+                pag_weight,
+                rescaling_fraction,
+                apply_rescaling_to_pag,
             )
-            s0 = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
-            s1 = torch.std(v_out_unnorm, dim=(1, 2, 3), keepdim=True)
 
-            v_out_normed = v_out_unnorm * s0 / s1
-            v_final = v_out_normed * rescaling_fraction + v_out_unnorm * (
-                1 - rescaling_fraction
-            )
-
-            pred_final = alpha * x - v_final * sigma
             return pred_final
 
         m = model.clone()
@@ -191,6 +227,7 @@ class RescaledSEG:
                         "round": 0.01,
                     },
                 ),
+                "apply_rescaling_to_seg": ("BOOLEAN", {"default": True}),
                 "rescaling_fraction": (
                     "FLOAT",
                     {
@@ -243,6 +280,7 @@ class RescaledSEG:
         model: ModelPatcher,
         seg_sigma: float = 30.0,
         seg_weight: float = 3.0,
+        apply_rescaling_to_seg: bool = True,
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
         unet_block_id: int = 0,
@@ -258,26 +296,22 @@ class RescaledSEG:
             uncond_pred = args["uncond_denoised"]
             cond_scale = args["cond_scale"]
             cond = args["cond"]
-            sigma_ = args["sigma"]
+            sigma = args["sigma"]
             model_options = args["model_options"].copy()
-            sigma = sigma_.view(sigma_.shape[:1] + (1,) * (cond_pred.ndim - 1))
             x = args["input"]
 
             noise_fracs = model_options["transformer_options"]["sample_sigmas"] ** 2
-            current_frac = sigma_**2 / noise_fracs[0]
+            current_frac = sigma**2 / noise_fracs[0]
 
             alpha = 1 / (sigma**2 + 1.0) ** 0.5
             sigma = sigma / (sigma**2 + 1.0) ** 0.5
             sigma_inv = 1.0 / sigma
 
-            cond_v = (alpha * x - cond_pred) * sigma_inv
-            uncond_v = (alpha * x - uncond_pred) * sigma_inv
-
             if (noise_fraction_end <= current_frac) and (
                 current_frac <= noise_fraction_start
             ):
                 if unet_block_list:
-                    blocks = parse_unet_blocks(model, unet_block_list)
+                    blocks = unet.parse_unet_blocks(model, unet_block_list)
                 else:
                     blocks = [(unet_block, unet_block_id, None)]
 
@@ -285,7 +319,7 @@ class RescaledSEG:
                     layer, number, index = block
                     model_options = set_model_options_patch_replace(
                         model_options,
-                        seg_attention_wrapper(
+                        unet.seg_attention_wrapper(
                             optimized_attention, blur_sigma=seg_sigma
                         ),
                         "attn1",
@@ -294,27 +328,23 @@ class RescaledSEG:
                         index,
                     )
 
-                (pag_cond_pred,) = calc_cond_batch(
-                    model, [cond], x, sigma_, model_options
+                (seg_cond_pred,) = calc_cond_batch(
+                    model, [cond], x, sigma, model_options
                 )
-                pag_cond_v = (alpha * x - pag_cond_pred) * sigma_inv
             else:
-                pag_cond_v = cond_v
+                seg_cond_pred = cond_pred
 
-            v_out_unnorm = (
-                uncond_v
-                + cond_scale * (cond_v - uncond_v)
-                - seg_weight * (pag_cond_v - cond_v)
+            pred_final = compute_v_space_normalised_combination(
+                x,
+                sigma,
+                cond_pred,
+                uncond_pred,
+                cond_scale,
+                seg_cond_pred,
+                seg_weight,
+                rescaling_fraction,
+                apply_rescaling_to_seg,
             )
-            s0 = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
-            s1 = torch.std(v_out_unnorm, dim=(1, 2, 3), keepdim=True)
-
-            v_out_normed = v_out_unnorm * s0 / s1
-            v_final = v_out_normed * rescaling_fraction + v_out_unnorm * (
-                1 - rescaling_fraction
-            )
-
-            pred_final = alpha * x - v_final * sigma
             return pred_final
 
         m = model.clone()
