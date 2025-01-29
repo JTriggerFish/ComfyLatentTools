@@ -1,14 +1,47 @@
 import math
 from typing import Callable
-import torch
 from torch import Tensor
-import torch.nn.functional as F
 from itertools import groupby
 
+from latent_filters import gaussian_blur_2d
 
-def pag_perturbed_attention(q: Tensor, k: Tensor, v: Tensor, extra_options, mask=None):
+
+def pag_perturbed_attention(
+    q: Tensor, k: Tensor, v: Tensor, extra_options, mask=None
+) -> Tensor:
     """Perturbed self-attention corresponding to an identity matrix replacing the attention matrix."""
     return v
+
+
+def seg_attention_wrapper(attention: Callable, blur_sigma: float = 10.0):
+    def seg_perturbed_attention(
+        q: Tensor, k: Tensor, v: Tensor, extra_options, mask=None
+    ) -> Tensor:
+        """Smoothed Energy Guidance self-attention"""
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
+
+        height_orig, width_orig = extra_options["original_shape"][2:4]
+        aspect_ratio = width_orig / height_orig
+
+        if aspect_ratio >= 1.0:
+            height = round((area / aspect_ratio) ** 0.5)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
+        else:
+            width = round((area * aspect_ratio) ** 0.5)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+
+        if blur_sigma >= 0:
+            kernel_size = math.ceil(6 * blur_sigma) + 1 - math.ceil(6 * blur_sigma) % 2
+            q = gaussian_blur_2d(q, kernel_size, blur_sigma)
+        else:
+            q[:] = q.mean(dim=(-2, -1), keepdim=True)
+
+        q = q.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+
+        return attention(q, k, v, heads=heads)
+
+    return seg_perturbed_attention
 
 
 def parse_unet_blocks(model, unet_block_list: str):

@@ -5,6 +5,8 @@ import torchvision.transforms as transforms
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
+from torch.nn import functional as F
 
 
 def center_tensor(
@@ -180,3 +182,26 @@ def latent_upscale(
     # Upscale each channel separately
     res = upscale(latent)
     return res
+
+
+def gaussian_blur_2d(img: Tensor, kernel_size: int, sigma: float) -> Tensor:
+    height = img.shape[-1]
+    kernel_size = min(kernel_size, height - (height % 2 - 1))
+    ksize_half = (kernel_size - 1) * 0.5
+
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+
+    pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+
+    x_kernel = pdf / pdf.sum()
+    x_kernel = x_kernel.to(device=img.device, dtype=img.dtype)
+
+    kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+
+    img = F.pad(img, padding, mode="reflect")
+    img = F.conv2d(img, kernel2d, groups=img.shape[-3])
+
+    return img
