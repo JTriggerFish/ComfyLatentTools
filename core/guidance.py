@@ -1,186 +1,181 @@
-import torch
-import enum
-import dataclasses
-from .latent_filters import gaussian_blur_2d
+import kornia.geometry
+from torch import Tensor
+from itertools import groupby
+import math
+
+from .latent_filters import gaussian_blur_2d, gaussian_kernel_size_for_img
 
 
-class GuidanceCombinationMethod(str, enum.Enum):
-    PLAIN = "Plain"
-    PRED_SPACE_RESCALE = "PredSpaceRescale"
-    V_SPACE_RESCALE = "VSpaceRescale"
-    SNF = "SNF"
+def pag_perturbed_attention(
+    q: Tensor, k: Tensor, v: Tensor, extra_options, mask=None
+) -> Tensor:
+    """Perturbed self-attention corresponding to an identity matrix replacing the attention matrix."""
+    return v
 
 
-class AlternateConditionalComparator(str, enum.Enum):
-    BASE_COND = "BaseCond"
-    ALTERNATE_UNCOND = "AlternateUncond"
-
-
-def plain_combination(
-    cond_x,
-    uncond_x,
-    cfg: float,
-    alternate_cond_x,
-    alternate_uncond_x,
-    alternate_weight: float,
-    alternate_cond_comparator: AlternateConditionalComparator,
-) -> torch.Tensor:
-    if (
-        alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND
-        and alternate_uncond_x is None
-    ):
-        raise ValueError(
-            "Alternate uncond x is required for alternate uncond comparator"
-        )
-    if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-        alternate_guidance = alternate_uncond_x - alternate_cond_x
-    else:
-        alternate_guidance = alternate_cond_x - cond_x
-    return uncond_x + cfg * (cond_x - uncond_x) - alternate_weight * alternate_guidance
-
-
-def v_space_normalised_combination(
-    x,
-    sigma_,
-    cond_x,
-    uncond_x,
-    cfg: float,
-    alternate_cond_x,
-    alternate_uncond_x,
-    alternate_weight: float,
-    rescaling_weight: float,
-    apply_rescaling_to_alternate: bool,
-    alternate_cond_comparator: AlternateConditionalComparator,
-) -> torch.Tensor:
+def seg_attention_wrapper(
+    attention: callable,
+    blur_sigma: float = 10.0,
+) -> callable:
     """
-    Convert from x_0 prediction space to v prediction space and combine
-    with partial rescaling
+    Wraps an attention function to apply a Gaussian blur (via Kornia) on q before computing attention.
 
+    Args:
+        attention: The attention function to wrap (must accept q, k, v, ...)
+        blur_sigma: If >= 0, apply Gaussian blur with this sigma. If < 0, replace q by the global mean.
+        border_mode: Passed to Kornia's GaussianBlur2d for handling edges
+                     ('reflect', 'replicate', 'constant', 'circular').
     """
-    # Reshape to match the dimensions of the input tensor
-    sigma = sigma_.view(sigma_.shape[:1] + (1,) * (cond_x.ndim - 1))
 
-    # Convert to variance preserving space
-    alpha = 1 / (sigma**2 + 1.0) ** 0.5
-    sigma = sigma * alpha
-    sigma_inv = 1.0 / sigma
-    x = x * alpha
+    def seg_perturbed_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
 
-    cond_v = (alpha * x - cond_x) * sigma_inv
-    uncond_v = (alpha * x - uncond_x) * sigma_inv
+        height_orig, width_orig = extra_options["original_shape"][2:4]
+        aspect_ratio = width_orig / height_orig
 
-    s0 = torch.std(cond_v, dim=(1, 2, 3), keepdim=True)
-    if apply_rescaling_to_alternate:
-        alternate_cond_v = (alpha * x - alternate_cond_x) * sigma_inv
-        if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-            alternate_uncond_v = (alpha * x - alternate_uncond_x) * sigma_inv
-            alternate_guidance = alternate_cond_v - alternate_uncond_v
+        # Reshape (B, area, dim) -> (B, dim, H, W)
+        if aspect_ratio >= 1.0:
+            height = round((area / aspect_ratio) ** 0.5)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
         else:
-            alternate_guidance = alternate_cond_v - cond_v
-        v_out_unnorm = (
-            uncond_v + cfg * (cond_v - uncond_v) - alternate_weight * alternate_guidance
-        )
-        s1 = torch.std(v_out_unnorm, dim=(1, 2, 3), keepdim=True)
-        v_out_normed = v_out_unnorm * s0 / s1
-        v_final = v_out_normed * rescaling_weight + v_out_unnorm * (
-            1 - rescaling_weight
-        )
-        # Convert back to prediction space and rescale
-        pred_final = x * alpha - v_final * sigma
-    else:
-        # Apply standard CFG rescaling and combine with alternate
-        v_cfg_unnorm = uncond_v + cfg * (cond_v - uncond_v)
-        s1 = torch.std(v_cfg_unnorm, dim=(1, 2, 3), keepdim=True)
-        v_cfg_normed = v_cfg_unnorm * s0 / s1
-        v_cfg = v_cfg_normed * rescaling_weight + v_cfg_unnorm * (1 - rescaling_weight)
-        pred_cfg = x * alpha - v_cfg * sigma
-        if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-            alternate_guidance = alternate_uncond_x - alternate_cond_x
+            width = round((area * aspect_ratio) ** 0.5)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+
+        if blur_sigma >= 0:
+            kernel_size = gaussian_kernel_size_for_img(
+                blur_sigma, q, cap_at_half_smallest_dim=False
+            )
+            q = gaussian_blur_2d(q, kernel_size, blur_sigma)
         else:
-            alternate_guidance = alternate_cond_x - cond_x
-        pred_final = pred_cfg - alternate_weight * alternate_guidance
+            # Negative blur_sigma => set entire q to the mean
+            q[:] = q.mean(dim=(-2, -1), keepdim=True)
 
-    return pred_final
+        # Reshape back to (B, area, dim) for the attention function
+        q = q.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+
+        return attention(q, k, v, heads=heads)
+
+    return seg_perturbed_attention
 
 
-def pred_space_normalised_combination(
-    cond_x,
-    uncond_x,
-    cfg: float,
-    alternate_cond_x,
-    alternate_uncond_x,
-    alternate_weight: float,
-    rescaling_weight: float,
-    apply_rescaling_to_alternate: bool,
-    alternate_cond_comparator: AlternateConditionalComparator,
-) -> torch.Tensor:
+def downsampled_attention_wrapper(
+    attention: callable,
+    downsample_factor: float,
+) -> callable:
 
-    s0 = torch.std(cond_x, dim=(1, 2, 3), keepdim=True)
-    if apply_rescaling_to_alternate:
-        if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-            alternate_guidance = alternate_cond_x - alternate_uncond_x
+    def downsampled_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
+
+        height_orig, width_orig = extra_options["original_shape"][2:4]
+        aspect_ratio = width_orig / height_orig
+        downscaled_area = round(area / downsample_factor**2)
+
+        # Reshape (B, area, dim) -> (B, dim, H, W)
+        if aspect_ratio >= 1.0:
+            height = round((area / aspect_ratio) ** 0.5)
+            new_height = round((downscaled_area / aspect_ratio) ** 0.5)
+            new_width = round(new_height * aspect_ratio)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
+            k = k.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
+            v = v.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
         else:
-            alternate_guidance = alternate_cond_x - cond_x
-        x_out_unnorm = (
-            uncond_x + cfg * (cond_x - uncond_x) - alternate_weight * alternate_guidance
+            width = round((area * aspect_ratio) ** 0.5)
+            new_width = round((downscaled_area * aspect_ratio) ** 0.5)
+            new_height = round(new_width / aspect_ratio)
+            q = q.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+            k = k.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+            v = v.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+
+        height, width = q.shape[-2:]
+        q = kornia.geometry.resize(
+            q, (new_height, new_width), interpolation="area", antialias=True
         )
-        s1 = torch.std(x_out_unnorm, dim=(1, 2, 3), keepdim=True)
-        x_out_normed = x_out_unnorm * s0 / s1
-        x_final = x_out_normed * rescaling_weight + x_out_unnorm * (
-            1 - rescaling_weight
+        k = kornia.geometry.resize(
+            k, (new_height, new_width), interpolation="area", antialias=True
         )
-    else:
-        # Apply standard CFG rescaling and combine with alternate
-        x_cfg_unnorm = uncond_x + cfg * (cond_x - uncond_x)
-        s1 = torch.std(x_cfg_unnorm, dim=(1, 2, 3), keepdim=True)
-        x_cfg_normed = x_cfg_unnorm * s0 / s1
-        x_cfg = x_cfg_normed * rescaling_weight + x_cfg_unnorm * (1 - rescaling_weight)
-        if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-            alternate_guidance = alternate_uncond_x - alternate_cond_x
-        else:
-            alternate_guidance = alternate_cond_x - cond_x
-        x_final = x_cfg - alternate_weight * alternate_guidance
+        v = kornia.geometry.resize(
+            v, (new_height, new_width), interpolation="area", antialias=True
+        )
 
-    return x_final
+        # Reshape back to (B, area, dim) for the attention function
+        q = q.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+        k = k.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+        v = v.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+
+        res = attention(q, k, v, heads=heads)
+
+        # Re upsample the attention map
+        res = res.permute(0, 2, 1).reshape(bs, inner_dim, new_height, new_width)
+        res = kornia.geometry.resize(
+            res, (height, width), interpolation="area", antialias=True
+        )
+        res = res.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+        return res
+
+    return downsampled_attention
 
 
-def snf_combination(
-    cond_a: torch.Tensor,
-    uncond_a: torch.Tensor,
-    cond_b: torch.Tensor,
-    uncond_b: torch.Tensor,
-    weight_a: float,
-    weight_b: float,
-    alternate_cond_comparator: AlternateConditionalComparator,
-):
+def parse_unet_blocks(model, unet_block_list: str):
     """
-    From  Saliency-adaptive Noise Fusion based on High-fidelity Person-centric Subject-to-Image Synthesis (Wang et al.)
-    :param cond_a:
-    :param uncond_a:
-    :param cond_b:
-    :param uncond_b:
-    :param weight_a:
-    :param weight_b:
-    :param alternate_cond_comparator:
+    Copied from https://github.com/pamparamm/sd-perturbed-attention/blob/master/pag_utils.py#L9
+    :param model:
+    :param unet_block_list:
     :return:
     """
-    x_a = weight_a * (cond_a - uncond_a)
-    if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-        x_b = weight_b * (cond_b - uncond_b)
-    else:
-        x_b = weight_b * (cond_b - cond_a)
+    output: list[tuple[str, int, int | None]] = []
 
-    b, c, h, w = x_a.shape
+    # Get all Self-attention blocks
+    input_blocks, middle_blocks, output_blocks = [], [], []
+    for name, module in model.diffusion_model.named_modules():
+        if module.__class__.__name__ == "CrossAttention" and name.endswith("attn1"):
+            parts = name.split(".")
+            block_name = parts[0]
+            block_id = int(parts[1])
+            if block_name.startswith("input"):
+                input_blocks.append(block_id)
+            elif block_name.startswith("middle"):
+                middle_blocks.append(block_id - 1)
+            elif block_name.startswith("output"):
+                output_blocks.append(block_id)
 
-    a_bar = gaussian_blur_2d(torch.abs(x_a), 3, 1.0)
-    b_bar = gaussian_blur_2d(torch.abs(x_b), 3, 1.0)
-    a_softmax = torch.softmax(a_bar.reshape(b * c, h * w), dim=1).reshape(b, c, h, w)
-    b_softmax = torch.softmax(b_bar.reshape(b * c, h * w), dim=1).reshape(b, c, h, w)
-    guidance_stacked = torch.stack([x_a, x_b], dim=0)
+    def group_blocks(blocks: list[int]):
+        return [(i, len(list(gr))) for i, gr in groupby(blocks)]
 
-    ab_softmax = torch.stack([a_softmax, b_softmax], dim=0)
-    argeps = torch.argmax(ab_softmax, dim=0, keepdim=True)
+    input_blocks, middle_blocks, output_blocks = (
+        group_blocks(input_blocks),
+        group_blocks(middle_blocks),
+        group_blocks(output_blocks),
+    )
 
-    # TODO : should do softmax instead of argmax
-    snf = torch.gather(guidance_stacked, dim=0, index=argeps).squeeze(0)
-    return snf
+    unet_blocks = [b.strip() for b in unet_block_list.split(",")]
+    for block in unet_blocks:
+        name, indices = block[0], block[1:].split(".")
+        match name:
+            case "d":
+                layer, cur_blocks = "input", input_blocks
+            case "m":
+                layer, cur_blocks = "middle", middle_blocks
+            case "u":
+                layer, cur_blocks = "output", output_blocks
+        if len(indices) >= 2:
+            number, index = cur_blocks[int(indices[0])][0], int(indices[1])
+            assert 0 <= index < cur_blocks[int(indices[0])][1]
+        else:
+            number, index = cur_blocks[int(indices[0])][0], None
+        output.append((layer, number, index))
+
+    return output

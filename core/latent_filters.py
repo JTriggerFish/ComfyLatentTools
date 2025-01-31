@@ -1,11 +1,14 @@
+import kornia.filters
 import numpy as np
 from typing import Callable
 from PIL import Image
 import torchvision.transforms as transforms
 
 import torch
+from kornia.filters import GaussianBlur2d
 from torch import Tensor
 from torch.nn import functional as F
+import math
 
 
 def center_tensor(
@@ -114,9 +117,9 @@ def moment_match(
 
 def add_correlated_gaussian_noise(
     latent: torch.Tensor,
-    sigma: float = 1.0,
+    kernel_sigma: float = 1.0,
     amplitude: float = 1.0,
-    max_kernel_size: int = 13,
+    noise_seed: int = 0,
 ) -> torch.Tensor:
     """
     Add correlated Gaussian noise to a latent tensor by:
@@ -126,42 +129,27 @@ def add_correlated_gaussian_noise(
 
     Args:
         latent (torch.Tensor): Input tensor of shape (B, C, H, W).
-        sigma (float): Standard deviation for the Gaussian kernel filter (controls correlation).
+        kernel_sigma (float): Standard deviation for the Gaussian kernel filter (controls correlation).
         amplitude (float): Scale factor for the filtered noise before adding.
-        max_kernel_size:  Maximum size of the Gaussian kernel (odd number).
 
     Returns:
         torch.Tensor: Tensor of the same shape, with correlated noise added.
     """
-    assert max_kernel_size % 2 == 1, "max_kernel_size must be odd"
 
     # 1) Generate white noise
-    noise = torch.randn_like(latent)  # same shape, ~N(0,1)
-
-    # base size based on sigma
-    kernel_size = int(min(2 * np.ceil(3 * sigma) + 1, max_kernel_size))
-
-    # 2) Build a 2D Gaussian kernel
-    #    We'll define an inline helper to create a normalized 2D kernel.
-    def gaussian_kernel_2d(k_size, sigma_val):
-        # Create coordinate grid centered at 0
-        coords = torch.arange(k_size) - (k_size - 1) / 2
-        xx, yy = torch.meshgrid(coords, coords, indexing="xy")
-        kernel_2d = torch.exp(-(xx**2 + yy**2) / (2.0 * sigma_val**2))
-        kernel_2d = kernel_2d / kernel_2d.sum()  # normalize to sum=1
-        return kernel_2d
-
-    kernel_2d = gaussian_kernel_2d(kernel_size, sigma)  # shape: (k_size, k_size)
-    kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)  # shape: (1, 1, k_size, k_size)
-
-    # 3) Convolve noise with Gaussian kernel for each channel
-    #    - We'll "repeat" the kernel for each channel and use grouped convolution
-    B, C, H, W = latent.shape
-    kernel_2d = kernel_2d.repeat(C, 1, 1, 1)  # shape: (C, 1, k_size, k_size)
-
-    #    - Pad so output is the same spatial size
-    pad = (kernel_size - 1) // 2
-    correlated_noise = F.conv2d(noise, kernel_2d, padding=pad, groups=C)
+    generator = torch.manual_seed(noise_seed)
+    noise = torch.randn(
+        latent.size(),
+        dtype=latent.dtype,
+        layout=latent.layout,
+        generator=generator,
+        device="cpu",
+    )
+    kernel_size = gaussian_kernel_size_for_img(kernel_sigma, latent)
+    q = kornia.filters.GaussianBlur2d(
+        (kernel_size, kernel_size), (kernel_sigma, kernel_sigma)
+    )
+    correlated_noise = q(noise)
 
     # 4) Scale and add to the original latent
     correlated_noise = amplitude * correlated_noise
@@ -183,9 +171,70 @@ def latent_upscale(
     return res
 
 
+def downsample_latent(latent: torch.Tensor, factor: float) -> torch.Tensor:
+    """
+    Downscale an SDXL latent by 'factor' with a Gaussian pre-filter and area interpolation.
+    Ensures final shape is divisible by 8.
+    """
+    B, C, H, W = latent.shape
+
+    # 1) Pre-blur to avoid aliasing
+    sigma = 0.5 * factor
+    kernel_size = int(math.ceil(6 * sigma))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    # Build Kornia's GaussianBlur2d
+    blur = kornia.filters.GaussianBlur2d(
+        kernel_size=(kernel_size, kernel_size),
+        sigma=(sigma, sigma),
+        border_type="reflect",
+        separable=True,
+    )
+    latent_blurred = blur(latent)  # on GPU if latent is on GPU
+
+    # 2) Downscale
+    new_h = int(H // factor)
+    new_w = int(W // factor)
+
+    # ensure multiple of 8
+    new_h = new_h // 8 * 8
+    new_w = new_w // 8 * 8
+
+    # do the actual resizing
+    latent_down = F.interpolate(latent_blurred, size=(new_h, new_w), mode="area")
+
+    return latent_down
+
+
+def gaussian_kernel_size_for_img(
+    sigma: float,
+    img: torch.Tensor,
+    kernel_size_cap: int | None = None,
+    cap_at_half_smallest_dim: bool = False,
+) -> int:
+    kernel_size = math.ceil(6 * sigma) + 1 - math.ceil(6 * sigma) % 2
+    height, width = img.shape[-2:]
+    smallest_dim = min(height, width)
+    if cap_at_half_smallest_dim:
+        max_k = smallest_dim + 1 - smallest_dim % 2
+    else:
+        max_k = 2 * smallest_dim - 1
+    kernel_size_cap = (
+        min(kernel_size_cap, max_k) if kernel_size_cap is not None else max_k
+    )
+    return min(kernel_size, kernel_size_cap)
+
+
 def gaussian_blur_2d(img: Tensor, kernel_size: int, sigma: float) -> Tensor:
-    height = img.shape[-1]
-    kernel_size = min(kernel_size, height - (height % 2 - 1))
+    blur = GaussianBlur2d(
+        kernel_size=(kernel_size, kernel_size),
+        sigma=(sigma, sigma),
+    )
+    im = blur(img)
+    return im
+
+
+def _gaussian_blur_2d_manual(img: Tensor, kernel_size: int, sigma: float) -> Tensor:
     ksize_half = (kernel_size - 1) * 0.5
 
     x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)

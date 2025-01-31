@@ -38,6 +38,10 @@ class LatentNormalizedLanczosResize:
                     "FLOAT",
                     {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
+                "noise_seed": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+                ),
             },
         }
 
@@ -65,6 +69,7 @@ class LatentNormalizedLanczosResize:
         latent_noise_std: float = 0.1,
         latent_noise_scale: float = 1.0,
         add_latent_upscale_with_weight: float = 0.0,
+        noise_seed: int = 0,
     ):
         samples = latent["samples"]
 
@@ -96,7 +101,7 @@ class LatentNormalizedLanczosResize:
 
         if add_latent_noise:
             matched_latent = lf.add_correlated_gaussian_noise(
-                matched_latent, latent_noise_scale, latent_noise_std
+                matched_latent, latent_noise_scale, latent_noise_std, noise_seed
             )
 
         return ({"samples": matched_latent},)
