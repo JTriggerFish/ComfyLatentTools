@@ -1,14 +1,11 @@
+import math
 import kornia.filters
-import numpy as np
-from typing import Callable
-from PIL import Image
 import torchvision.transforms as transforms
 
 import torch
 from kornia.filters import GaussianBlur2d
 from torch import Tensor
 from torch.nn import functional as F
-import math
 
 
 def center_tensor(
@@ -176,34 +173,13 @@ def downsample_latent(latent: torch.Tensor, factor: float) -> torch.Tensor:
     Downscale an SDXL latent by 'factor' with a Gaussian pre-filter and area interpolation.
     Ensures final shape is divisible by 8.
     """
+
     B, C, H, W = latent.shape
 
-    # 1) Pre-blur to avoid aliasing
-    sigma = 0.5 * factor
-    kernel_size = int(math.ceil(6 * sigma))
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    # Build Kornia's GaussianBlur2d
-    blur = kornia.filters.GaussianBlur2d(
-        kernel_size=(kernel_size, kernel_size),
-        sigma=(sigma, sigma),
-        border_type="reflect",
-        separable=True,
+    latent = kornia.geometry.transform.rescale(
+        latent, 1 / factor, interpolation="area", antialias=True
     )
-    latent_blurred = blur(latent)  # on GPU if latent is on GPU
-
-    # 2) Downscale
-    new_h = int(H // factor)
-    new_w = int(W // factor)
-
-    # ensure multiple of 8
-    new_h = new_h // 8 * 8
-    new_w = new_w // 8 * 8
-
-    # do the actual resizing
-    latent_down = F.interpolate(latent_blurred, size=(new_h, new_w), mode="area")
-
-    return latent_down
+    return latent
 
 
 def gaussian_kernel_size_for_img(
@@ -212,6 +188,7 @@ def gaussian_kernel_size_for_img(
     kernel_size_cap: int | None = None,
     cap_at_half_smallest_dim: bool = False,
 ) -> int:
+
     kernel_size = math.ceil(6 * sigma) + 1 - math.ceil(6 * sigma) % 2
     height, width = img.shape[-2:]
     smallest_dim = min(height, width)

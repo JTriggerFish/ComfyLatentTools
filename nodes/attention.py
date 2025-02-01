@@ -1,3 +1,4 @@
+import kornia.geometry.transform
 import torch
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
@@ -419,6 +420,18 @@ class DownsampledLatentGuidance:
                 downsampled_cond, downsampled_uncond = calc_cond_batch(
                     model, [cond, uncond], x_downsampled, sigma, model_options
                 )
+                downsampled_cond = kornia.geometry.transform.rescale(
+                    downsampled_cond,
+                    float(downsample_factor),
+                    interpolation="bilinear",
+                    antialias=True,
+                )
+                downsampled_uncond = kornia.geometry.transform.rescale(
+                    downsampled_uncond,
+                    float(downsample_factor),
+                    interpolation="bilinear",
+                    antialias=True,
+                )
             else:
                 downsampled_cond, downsampled_uncond = cond_pred, uncond_pred
 
@@ -430,7 +443,7 @@ class DownsampledLatentGuidance:
                 cond_scale,
                 downsampled_cond,
                 downsampled_uncond,
-                -guidance_weight,
+                guidance_weight,
                 rescaling_fraction,
                 apply_rescaling_to_guidance,
                 AlternateConditionalComparator.ALTERNATE_UNCOND,

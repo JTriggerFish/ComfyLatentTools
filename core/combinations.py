@@ -97,7 +97,8 @@ def v_space_normalised_combination(
         v_cfg = v_cfg_normed * rescaling_weight + v_cfg_unnorm * (1 - rescaling_weight)
         pred_cfg = x * alpha - v_cfg * sigma
         if alternate_cond_comparator == AlternateConditionalComparator.ALTERNATE_UNCOND:
-            alternate_guidance = alternate_uncond_x - alternate_cond_x
+            alternate_guidance = alternate_cond_x - alternate_uncond_x
+            # alternate_guidance = alternate_uncond_x - uncond_x
         else:
             alternate_guidance = alternate_cond_x - cond_x
         pred_final = pred_cfg - alternate_weight * alternate_guidance
