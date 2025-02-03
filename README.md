@@ -97,31 +97,6 @@ It can serve as a fast base for subsequent (re-)diffusion or refinement steps, i
   Blends the newly encoded latent with a direct “latent nearest” upscale.  
   *(Default: 0.0; Range: 0–1)*
 
+## Additional pages
+- [Some Comfy friendly maths](some_maths.md)
 
-
-# Math notes
-## Why is the CFG and PAG rescaling done in v-pred space
-A shown in [2](#ref2), the v-prediction velocity is essentially the velocity of the discretized ODE that needs to be solved to sample at inference.
-A heuristic argument is that we can tweak the direction of this vector to change the trajectory of the denoising path without affecting the convergence of the scheme significantly.
-
-However, chaging the magnitude of this vector will cause over or under shooting the trajectory and either fail to converge or diverge, causing the "burnt" saturated images where the latent vectors get clipped to their max values.
-
-Therefore, by switching our prediction target to v-space instead of $x_0$ or $\epsilon$ space, which can all be done linearly, and ensuring that we renormalize the new vector, 
-we perform interpolation in a "safe" space where we can weigh things as much as we want while avoiding these issues.
-
-We can then convert the v-prediction back to $x_0$ prediction as expected by the rest of the diffusion code as implemented in ComfyUI.
-
-## TODO more rigorous derivation of this argument
-
-Thefreo
-
-# References
-<a id="ref1"></a>
-- [1]Efficient Diffusion Training via Min-SNR Weighting Strategy [paper](https://arxiv.org/abs/2303.09556)
-<a id="ref2"></a>
-- [2]Progressive Distillation for Fast Sampling of Diffusion Models [paper](https://arxiv.org/abs/2202.00512)
-- [3]Common Diffusion Noise Schedules and Sample Steps are Flawed [paper](https://arxiv.org/abs/2305.08891)
-- [4]sd_perturbed_attention [github](https://github.com/pamparamm/sd-perturbed-attention/tree/master)
-- [5]Perturbed-Attention Guidance from Self-Rectifying Diffusion Sampling with Perturbed-Attention Guidance [paper](https://cvlab-kaist.github.io/Perturbed-Attention-Guidance/)
-- [6]Smoothed Energy Guidance: Guiding Diffusion Models with Reduced Energy Curvature of Attention [paper](https://arxiv.org/abs/2408.00760)
-- [7]Sliding Window Guidance from The Unreasonable Effectiveness of Guidance for Diffusion Models [paper](https://arxiv.org/abs/2411.10257)
