@@ -418,7 +418,9 @@ def random_drop_attention_wrapper(
     return random_drop_perturbed_attention
 
 
-def random_drop_dual_attention_wrapper(drop_fraction: float = 0.5) -> callable:
+def random_drop_dual_attention_wrapper(
+    drop_fraction: float = 0.5, queries_rescale: float = 1.0
+) -> callable:
     """
     For each concept/dimension in the query embedding, we randomly drop
     out 'drop_fraction' of the tokens (across the sequence/spatial dimension).
@@ -427,6 +429,8 @@ def random_drop_dual_attention_wrapper(drop_fraction: float = 0.5) -> callable:
     In the limit of inner_dim=1, this reduces to the single-dimension case
     (equivalent to dropping entire tokens as in the simpler implementation).
     """
+    if queries_rescale <= 0:
+        queries_rescale = 1.0
 
     def random_drop_dual_perturbed_attention(
         q: Tensor,
@@ -482,11 +486,11 @@ def random_drop_dual_attention_wrapper(drop_fraction: float = 0.5) -> callable:
         # Mean of the remaining values per dimension
         # new_q_sum shape: [bs, 1, inner_dim]
         new_q_sum = new_q.sum(dim=1, keepdim=True)
-        new_q_mean = new_q_sum / remain_counts
+        new_q_mean = new_q_sum
 
         # Shift the kept tokens so that each dimension's mean matches the original
-        delta = original_q_mean - new_q_mean
-        new_q = new_q + delta
+        new_q += original_q_mean - new_q_mean
+        new_q *= queries_rescale
 
         # Standard attention call with updated Q (concept-dropped & mean-shifted)
         return optimized_attention(new_q, k, v, heads=heads, mask=mask)
