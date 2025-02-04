@@ -1,15 +1,13 @@
 - [ComfyLatentTools](#comfylatenttools)
   - [Installation](#installation)
+  - [Optional math notes](#optional-math-notes)
   - [Node Overview](#node-overview)
     - [Rescaled PAG ( Perturbed Attention Guidance )](#rescaled-pag--perturbed-attention-guidance-)
       - [Parameters](#parameters)
     - [Latent Normalized Lanczos Resize (LNLR)](#latent-normalized-lanczos-resize-lnlr)
       - [Internal Operation Order](#internal-operation-order)
       - [Parameters](#parameters-1)
-- [Math notes](#math-notes)
-  - [Why is the CFG and PAG rescaling done in v-pred space](#why-is-the-cfg-and-pag-rescaling-done-in-v-pred-space)
-  - [TODO more rigorous derivation of this argument](#todo-more-rigorous-derivation-of-this-argument)
-- [References](#references)
+  - [Additional pages](#additional-pages)
 
 # ComfyLatentTools
 
@@ -20,6 +18,8 @@ A set of custom nodes for ComfyUI, providing a specialized **Latent Normalized L
 1. Download or clone this repository into your ComfyUI's `custom_nodes` folder.
 2. Restart ComfyUI. The node(s) will appear in the **image/upscaling** category.
 
+## Optional math notes
+[Some Comfy friendly maths](some_maths.md)
 ## Node Overview
 
 ### Rescaled PAG ( Perturbed Attention Guidance )
