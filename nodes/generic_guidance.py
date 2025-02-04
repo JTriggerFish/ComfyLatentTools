@@ -15,7 +15,7 @@ class GenericAttentionGuidance:
                 "model": ("MODEL",),
                 "guidance_type": (
                     s.guidance_types,
-                    {"default": "SEG"},
+                    {"default": "RandomDrop"},
                 ),
                 "guidance_weight": (
                     "FLOAT",
@@ -30,7 +30,7 @@ class GenericAttentionGuidance:
                 "param1": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": 1.0,
                         "min": -1.0,
                         "max": 1.0,
                         "step": 0.01,
@@ -40,7 +40,7 @@ class GenericAttentionGuidance:
                 "param2": (
                     "FLOAT",
                     {
-                        "default": 0.0,
+                        "default": -1.0,
                         "min": -1.0,
                         "max": 1.0,
                         "step": 0.01,
@@ -118,8 +118,8 @@ class GenericAttentionGuidance:
         guidance_type: str = "SEG",
         guidance_weight: float = 1.5,
         param1: float = 0.0,
-        param2: float = 0.0,
-        param3: float = 0.0,
+        param2: float = -1.0,
+        param3: float = -1.0,
         apply_rescaling_to_alternate_guidance: bool = False,
         rescaling_method: str = "VSpaceRescale",
         rescaling_fraction: float = 0.7,
@@ -165,7 +165,13 @@ class GenericAttentionGuidance:
                     case guidance.GuidanceType.SEG:
                         attention_fn = guidance.seg_attention_wrapper(param1)
                     case guidance.GuidanceType.RANDOM_DROP:
-                        attention_fn = guidance.random_drop_attention_wrapper(param1)
+                        attention_fn = guidance.random_drop_attention_wrapper(
+                            param1, param2
+                        )
+                    case guidance.GuidanceType.RANDOM_DROP_DUAL:
+                        attention_fn = guidance.random_drop_dual_attention_wrapper(
+                            param1, param2
+                        )
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 

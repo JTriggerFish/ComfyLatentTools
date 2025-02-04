@@ -24,6 +24,7 @@ class GuidanceType(str, enum.Enum):
     SWG = "SWG"
     DOWNSAMPLED = "Downsampled"
     RANDOM_DROP = "RandomDrop"
+    RANDOM_DROP_DUAL = "RandomDropDual"
     DISTANCE_WEIGHTED = "DistanceWeighted"
 
 
@@ -338,16 +339,20 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
     return seg_perturbed_attention
 
 
-def random_drop_attention_wrapper(drop_fraction: float = 0.5) -> callable:
+def random_drop_attention_wrapper(
+    drop_fraction: float = 0.5, queries_rescale: float = 1.0
+) -> callable:
     """
     Wraps an attention function in which we randomly drop the queries for a
     fraction of the tokens. This is done via setting a mask to zero out those
     dropped queries.
 
-    Additionally, the mean of the remaining queries is re-scaled to match the
-    mean of the original queries (per batch). The minimum number of non-dropped
-    queries is enforced to be 1.
+    Additionally, the mean of the remaining queries is shifted to match the
+    mean of the original queries (per batch).
+    Finally, the remaining queries are rescaled by "queries_rescale"
     """
+    if queries_rescale <= 0:
+        queries_rescale = 1.0
 
     def random_drop_perturbed_attention(
         q: Tensor,
@@ -372,7 +377,8 @@ def random_drop_attention_wrapper(drop_fraction: float = 0.5) -> callable:
         original_q_mean = q.mean(dim=1, keepdim=True)
 
         # How many tokens to drop (ensure at least 1 remains)
-        num_tokens_to_drop = min(area - 1, round(area * drop_fraction))
+        # num_tokens_to_drop = min(area - 1, round(area * drop_fraction))
+        num_tokens_to_drop = min(area, round(area * drop_fraction))
 
         # Create a boolean mask for each batch element
         # shape: (bs, area)
@@ -393,22 +399,99 @@ def random_drop_attention_wrapper(drop_fraction: float = 0.5) -> callable:
 
         # Rescale the remaining queries so the equivalent number of tokens is the same
         # as the original number of tokens
-        new_q = new_q * area / (area - num_tokens_to_drop)
+        # new_q = new_q * area / (area - num_tokens_to_drop)
 
         # Compute mean of the non-dropped queries per batch
         # remain_mask_3d.sum(dim=1, keepdim=True) is shape (bs, 1, inner_dim)
         # but since remain_mask is boolean, we can sum the boolean to get counts
         # remain_counts = remain_mask_3d.sum(dim=1, keepdim=True)
-        # new_q_mean = new_q.sum(dim=1, keepdim=True) / remain_counts.clamp(min=1)
+        new_q_mean = new_q.sum(dim=1, keepdim=True)  # / remain_counts.clamp(min=1)
         #
-        # # Moment match the mean of the remaining queries to the original mean
-        # new_q = new_q + (original_q_mean - new_q_mean)
+        # Shift everything so that the mean of queries matches the original mean
+        new_q += original_q_mean - new_q_mean
+        new_q *= queries_rescale
 
         # Finally, call the attention function with updated queries
         res = optimized_attention(new_q, k, v, heads=heads, mask=mask)
         return res
 
     return random_drop_perturbed_attention
+
+
+def random_drop_dual_attention_wrapper(drop_fraction: float = 0.5) -> callable:
+    """
+    For each concept/dimension in the query embedding, we randomly drop
+    out 'drop_fraction' of the tokens (across the sequence/spatial dimension).
+    We then shift the remaining values to preserve the per-dimension mean.
+
+    In the limit of inner_dim=1, this reduces to the single-dimension case
+    (equivalent to dropping entire tokens as in the simpler implementation).
+    """
+
+    def random_drop_dual_perturbed_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        """
+        Args:
+          q, k, v: [batch_size, area, inner_dim]
+          extra_options: dict containing "n_heads", etc.
+          mask: optional attention mask
+        """
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
+
+        # Mean of each dimension over 'area' for each batch
+        # Shape: [bs, 1, inner_dim]
+        original_q_mean = q.mean(dim=1, keepdim=True)
+
+        # Decide how many tokens to drop per dimension (at most area-1)
+        tokens_to_drop = min(area - 1, round(area * drop_fraction))
+        fraction = tokens_to_drop / area  # fraction in [0, 1)
+
+        # Generate random numbers to decide which tokens to drop for each (batch, token, dim)
+        # Shape: [bs, area, inner_dim]
+        rand_vals = torch.rand(bs, area, inner_dim, device=q.device)
+
+        # If fraction > 0, find the threshold for each (batch, dim) across the 'area' dimension
+        # so that exactly 'fraction' of tokens are "dropped" (lowest random values).
+        # Shape of threshold: [bs, 1, inner_dim]
+        if fraction > 0:
+            threshold = torch.quantile(rand_vals, fraction, dim=1, keepdim=True)
+        else:
+            # fraction=0 -> no tokens to drop
+            # set threshold lower than all random values so none get dropped
+            threshold = rand_vals.amin(dim=1, keepdim=True) - 1e-8
+
+        # dropped_mask: True where the random value is <= threshold
+        dropped_mask = rand_vals <= threshold
+
+        # remain_mask: True where we keep the token, i.e. random value > threshold
+        remain_mask = ~dropped_mask  # shape: [bs, area, inner_dim]
+
+        # Zero out dropped elements in q
+        new_q = q * remain_mask
+
+        # Compute how many tokens remain for each (batch, dim)
+        # remain_counts shape: [bs, 1, inner_dim]
+        remain_counts = remain_mask.sum(dim=1, keepdim=True).clamp(min=1)
+
+        # Mean of the remaining values per dimension
+        # new_q_sum shape: [bs, 1, inner_dim]
+        new_q_sum = new_q.sum(dim=1, keepdim=True)
+        new_q_mean = new_q_sum / remain_counts
+
+        # Shift the kept tokens so that each dimension's mean matches the original
+        delta = original_q_mean - new_q_mean
+        new_q = new_q + delta
+
+        # Standard attention call with updated Q (concept-dropped & mean-shifted)
+        return optimized_attention(new_q, k, v, heads=heads, mask=mask)
+
+    return random_drop_dual_perturbed_attention
 
 
 def downsampled_attention_wrapper(
