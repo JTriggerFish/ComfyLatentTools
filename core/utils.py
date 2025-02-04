@@ -6,16 +6,23 @@ from .latent_filters import gaussian_blur_2d
 
 def pred_to_v(
     x: torch.Tensor,
-    alpha: torch.Tensor,
     sigma: torch.Tensor,
     preds: list[torch.Tensor | None],
 ) -> list[torch.Tensor | None]:
-    sigma_inv = 1.0 / sigma
-    alpha_x = alpha * x
+    """
+    Note that in comfyui, the "pred" output are actually alpha_t * E[x_{t-1}| x_t]
+    therefore v_t = (pred - x) / sigma**2
+    :param x:
+    :param alpha:
+    :param sigma:
+    :param preds:
+    :return:
+    """
+    sigma2_inv = 1.0 / sigma**2
     ret = []
     for pred in preds:
         if pred is not None:
-            ret.append((alpha_x - pred) * sigma_inv)
+            ret.append((pred - x) * sigma2_inv)
         else:
             ret.append(None)
     return ret
@@ -23,15 +30,14 @@ def pred_to_v(
 
 def v_to_pred(
     x: torch.Tensor,
-    alpha: torch.Tensor,
     sigma: torch.Tensor,
     v_preds: list[torch.Tensor | None],
 ) -> list[torch.Tensor | None]:
-    alpha_x = alpha * x
     ret = []
+    sigma2 = sigma**2
     for v_pred in v_preds:
         if v_pred is not None:
-            ret.append(alpha_x - v_pred * sigma)
+            ret.append(sigma2 * v_pred + x)
         else:
             ret.append(None)
     return ret

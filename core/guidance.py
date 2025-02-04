@@ -119,16 +119,9 @@ def v_space_rescaled_guidance_combine(
     # Reshape sigma to match the dimensions of the input tensor
     sigma = sigma.view(sigma.shape[:1] + (1,) * (cond_pred.ndim - 1))
 
-    # Convert to variance preserving space
-    x = x / (sigma**2 + 1.0) ** 0.5
-    alpha = 1 / (sigma**2 + 1.0) ** 0.5
-    sigma = sigma * alpha
-    x = x * alpha
-
     # Transform predictions to V-space
     [cond, uncond, alt, alt_ref] = utils.pred_to_v(
         x,
-        alpha,
         sigma,
         [cond_pred, uncond_pred, alternate_pred, alternate_pred_ref],
     )
@@ -149,12 +142,12 @@ def v_space_rescaled_guidance_combine(
         guidance = utils.partial_rescaling(
             ref_tensor=cond, z=guidance, rescaled_fraction=rescaling_fraction
         )
-        final_pred = utils.v_to_pred(x, alpha, sigma, [guidance])[0]
+        final_pred = utils.v_to_pred(x, sigma, [guidance])[0]
     else:
         base_guidance = utils.partial_rescaling(
             ref_tensor=cond, z=base_guidance, rescaled_fraction=rescaling_fraction
         )
-        final_pred = utils.v_to_pred(x, alpha, sigma, [base_guidance])[0]
+        final_pred = utils.v_to_pred(x, sigma, [base_guidance])[0]
         final_pred += guidance_adj
 
     return final_pred
