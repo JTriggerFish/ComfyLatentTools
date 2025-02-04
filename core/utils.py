@@ -1,5 +1,6 @@
 from itertools import groupby
 
+import torch.nn.functional as F
 import torch
 from .latent_filters import gaussian_blur_2d
 
@@ -66,14 +67,43 @@ def saliency_tensor_combination(
     b_bar = gaussian_blur_2d(torch.abs(x_b), 3, 1.0)
     a_softmax = torch.softmax(a_bar.reshape(b * c, h * w), dim=1).reshape(b, c, h, w)
     b_softmax = torch.softmax(b_bar.reshape(b * c, h * w), dim=1).reshape(b, c, h, w)
-    guidance_stacked = torch.stack([x_a, x_b], dim=0)
 
+    guidance_stacked = torch.stack([x_a, x_b], dim=0)
     ab_softmax = torch.stack([a_softmax, b_softmax], dim=0)
     argeps = torch.argmax(ab_softmax, dim=0, keepdim=True)
 
     # TODO : should do softmax instead of argmax
     snf = torch.gather(guidance_stacked, dim=0, index=argeps).squeeze(0)
     return snf
+
+
+def softmax_weighted_combination(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    temperature: float = 1.0,
+):
+    assert (
+        x1.shape == x2.shape
+    ), f"x1 and x2 must have the same shape; got {x1.shape} vs {x2.shape}"
+    B, C, H, W = x1.shape
+    # (B) Single-scalar weighting per batch element:
+    # 1. Flatten each (b) => shape (B, C*H*W)
+    x1_flat = x1.view(B, -1)
+    x2_flat = x2.view(B, -1)
+    # 2. L2 norms => shape (B,)
+    n1 = x1_flat.pow(2).sum(dim=1).sqrt()
+    n2 = x2_flat.pow(2).sum(dim=1).sqrt()
+    # 3. For each b, do a 2-element softmax across n1[b], n2[b]
+    #    => shape (B,2)
+    norms = torch.stack([n1, n2], dim=1) / temperature
+    weights = F.softmax(norms, dim=1)  # shape (B,2)
+    alpha = weights[:, 0]  # shape (B,)
+    # 4. Expand alpha => shape (B,1,1,1)
+    alpha = alpha.view(B, 1, 1, 1)
+    # 5. Weighted blend
+    out = alpha * x1 + (1 - alpha) * x2
+
+    return out
 
 
 def parse_unet_blocks(model, unet_block_list: str):

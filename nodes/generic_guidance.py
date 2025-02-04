@@ -164,6 +164,8 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.pag_attention_wrapper()
                     case guidance.GuidanceType.SEG:
                         attention_fn = guidance.seg_attention_wrapper(param1)
+                    case guidance.GuidanceType.RANDOM_DROP:
+                        attention_fn = guidance.random_drop_attention_wrapper(param1)
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 

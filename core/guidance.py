@@ -1,3 +1,5 @@
+import random
+
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
 import kornia.geometry
@@ -30,6 +32,7 @@ class GuidanceScalingMethod(str, enum.Enum):
     PRED_SPACE_RESCALE = "PredSpaceRescale"
     V_SPACE_RESCALE = "VSpaceRescale"
     SNF = "SNF"
+    SOFTMAX = "Softmax"
 
 
 def plain_guidance_combine(
@@ -60,7 +63,8 @@ def snf_guidance_combine(
     alternate_pred_ref: Tensor | None,
     alternate_guidance_weight: float,
 ) -> Tensor:
-    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
+    base = cond_pred
+    cfg = max(cfg - 1, 0) * (cond_pred - uncond_pred)
 
     if alternate_pred is None:
         raise ValueError("Alternate prediction must be provided for SNF guidance.")
@@ -69,7 +73,31 @@ def snf_guidance_combine(
             alternate_pred_ref = 0
         guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
 
-    return utils.saliency_tensor_combination(base_guidance, guidance_adj)
+    return base + utils.saliency_tensor_combination(cfg, guidance_adj)
+
+
+def softmax_guidance_combine(
+    cond_pred: Tensor,
+    uncond_pred: Tensor,
+    cfg: float,
+    alternate_pred: Tensor | None,
+    alternate_pred_ref: Tensor | None,
+    alternate_guidance_weight: float,
+    temperature: float = 1.0,
+) -> Tensor:
+    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
+
+    base = cond_pred
+    cfg = max(cfg - 1, 0) * (cond_pred - uncond_pred)
+
+    if alternate_pred is None:
+        raise ValueError("Alternate prediction must be provided for SNF guidance.")
+    else:
+        if alternate_pred_ref is None:
+            alternate_pred_ref = 0
+        guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
+
+    return base + utils.softmax_weighted_combination(cfg, guidance_adj, temperature)
 
 
 def pred_rescaled_guidance_combine(
@@ -209,6 +237,15 @@ def guidance_combine_and_scale(
                 alternate_pred_ref,
                 alternate_guidance_weight,
             )
+        case GuidanceScalingMethod.SOFTMAX:
+            return softmax_guidance_combine(
+                cond_pred,
+                uncond_pred,
+                cfg,
+                alternate_pred,
+                alternate_pred_ref,
+                alternate_guidance_weight,
+            )
         case _:
             raise ValueError(f"Unknown guidance scaling method: {scaling_method}")
 
@@ -299,6 +336,79 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
         return optimized_attention(q, k, v, heads=heads)
 
     return seg_perturbed_attention
+
+
+def random_drop_attention_wrapper(drop_fraction: float = 0.5) -> callable:
+    """
+    Wraps an attention function in which we randomly drop the queries for a
+    fraction of the tokens. This is done via setting a mask to zero out those
+    dropped queries.
+
+    Additionally, the mean of the remaining queries is re-scaled to match the
+    mean of the original queries (per batch). The minimum number of non-dropped
+    queries is enforced to be 1.
+    """
+
+    def random_drop_perturbed_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        """
+        q, k, v: [batch_size, num_tokens, inner_dim]
+        extra_options: dictionary containing additional options (e.g. "n_heads")
+        mask: optional mask for attention
+        """
+        # Number of attention heads
+        heads = extra_options["n_heads"]
+
+        # q.shape = (bs, area, inner_dim)
+        bs, area, inner_dim = q.shape
+
+        # Calculate the original mean of q per batch across tokens
+        # shape: (bs, 1, inner_dim)
+        original_q_mean = q.mean(dim=1, keepdim=True)
+
+        # How many tokens to drop (ensure at least 1 remains)
+        num_tokens_to_drop = min(area - 1, round(area * drop_fraction))
+
+        # Create a boolean mask for each batch element
+        # shape: (bs, area)
+        remain_mask = torch.ones(bs, area, device=q.device, dtype=torch.bool)
+
+        # Randomly zero out `num_tokens_to_drop` tokens in each batch
+        for i in range(bs):
+            # Random permutation of [0..area-1]
+            indices = torch.randperm(area, device=q.device)
+            drop_idx = indices[:num_tokens_to_drop]
+            remain_mask[i, drop_idx] = False
+
+        # Expand to shape (bs, area, inner_dim) for broadcast multiplication
+        remain_mask_3d = remain_mask.unsqueeze(-1)
+
+        # Zero out dropped queries
+        new_q = q * remain_mask_3d
+
+        # Rescale the remaining queries so the equivalent number of tokens is the same
+        # as the original number of tokens
+        new_q = new_q * area / (area - num_tokens_to_drop)
+
+        # Compute mean of the non-dropped queries per batch
+        # remain_mask_3d.sum(dim=1, keepdim=True) is shape (bs, 1, inner_dim)
+        # but since remain_mask is boolean, we can sum the boolean to get counts
+        # remain_counts = remain_mask_3d.sum(dim=1, keepdim=True)
+        # new_q_mean = new_q.sum(dim=1, keepdim=True) / remain_counts.clamp(min=1)
+        #
+        # # Moment match the mean of the remaining queries to the original mean
+        # new_q = new_q + (original_q_mean - new_q_mean)
+
+        # Finally, call the attention function with updated queries
+        res = optimized_attention(new_q, k, v, heads=heads, mask=mask)
+        return res
+
+    return random_drop_perturbed_attention
 
 
 def downsampled_attention_wrapper(
