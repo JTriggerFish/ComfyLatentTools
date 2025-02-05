@@ -21,10 +21,11 @@ except ImportError:
 class GuidanceType(str, enum.Enum):
     SEG = "SEG"
     PAG = "PAG"
+    AAT = "AAT"
     SWG = "SWG"
+    FUZZY = "Fuzzy"
+    RANDOM_ROTATION = "RandomRotation"
     DOWNSAMPLED = "Downsampled"
-    RANDOM_DROP = "RandomDrop"
-    RANDOM_DROP_DUAL = "RandomDropDual"
     DISTANCE_WEIGHTED = "DistanceWeighted"
 
 
@@ -339,163 +340,160 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
     return seg_perturbed_attention
 
 
-def random_drop_attention_wrapper(
-    drop_fraction: float = 0.5, queries_rescale: float = 1.0
+def affine_attention_transform_wrapper(
+    scaling_factor: float = 1.0,
+    translation_factor: float = 0.0,
+    mean_extrapolation_factor: float = 0.0,
 ) -> callable:
     """
-    Wraps an attention function in which we randomly drop the queries for a
-    fraction of the tokens. This is done via setting a mask to zero out those
-    dropped queries.
 
-    Additionally, the mean of the remaining queries is shifted to match the
-    mean of the original queries (per batch).
-    Finally, the remaining queries are rescaled by "queries_rescale"
+    A perturbed attention function that applies an affine transformation to the queries before calling the attention
+
+    Parameters
+    ----------
+    scaling_factor : float
+        Multiplier applied to the query vectors (default: 1.0).
+    translation_factor : float
+        Constant added to every element of the query vectors (default: 0.0).
+    mean_extrapolation_factor : float
+        Weight of the global mean of Q that is added to each query vector
+        (default: 0.0).
+
+    Returns
+    -------
+    callable
+        A function that takes (q, k, v, extra_options, mask) and returns the
+        output of `optimized_attention` using the transformed queries.
     """
-    if queries_rescale <= 0:
-        queries_rescale = 1.0
-
-    def random_drop_perturbed_attention(
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        extra_options,
-        mask=None,
-    ) -> Tensor:
-        """
-        q, k, v: [batch_size, num_tokens, inner_dim]
-        extra_options: dictionary containing additional options (e.g. "n_heads")
-        mask: optional mask for attention
-        """
-        # Number of attention heads
-        heads = extra_options["n_heads"]
-
-        # q.shape = (bs, area, inner_dim)
-        bs, area, inner_dim = q.shape
-
-        # Calculate the original mean of q per batch across tokens
-        # shape: (bs, 1, inner_dim)
-        original_q_mean = q.mean(dim=1, keepdim=True)
-
-        # How many tokens to drop (ensure at least 1 remains)
-        # num_tokens_to_drop = min(area - 1, round(area * drop_fraction))
-        num_tokens_to_drop = min(area, round(area * drop_fraction))
-
-        # Create a boolean mask for each batch element
-        # shape: (bs, area)
-        remain_mask = torch.ones(bs, area, device=q.device, dtype=torch.bool)
-
-        # Randomly zero out `num_tokens_to_drop` tokens in each batch
-        for i in range(bs):
-            # Random permutation of [0..area-1]
-            indices = torch.randperm(area, device=q.device)
-            drop_idx = indices[:num_tokens_to_drop]
-            remain_mask[i, drop_idx] = False
-
-        # Expand to shape (bs, area, inner_dim) for broadcast multiplication
-        remain_mask_3d = remain_mask.unsqueeze(-1)
-
-        # Zero out dropped queries
-        new_q = q * remain_mask_3d
-
-        # Rescale the remaining queries so the equivalent number of tokens is the same
-        # as the original number of tokens
-        # new_q = new_q * area / (area - num_tokens_to_drop)
-
-        # Compute mean of the non-dropped queries per batch
-        # remain_mask_3d.sum(dim=1, keepdim=True) is shape (bs, 1, inner_dim)
-        # but since remain_mask is boolean, we can sum the boolean to get counts
-        # remain_counts = remain_mask_3d.sum(dim=1, keepdim=True)
-        new_q_mean = new_q.sum(dim=1, keepdim=True)  # / remain_counts.clamp(min=1)
-        #
-        # Shift everything so that the mean of queries matches the original mean
-        new_q += original_q_mean - new_q_mean
-        new_q *= queries_rescale
-
-        # Finally, call the attention function with updated queries
-        res = optimized_attention(new_q, k, v, heads=heads, mask=mask)
-        return res
-
-    return random_drop_perturbed_attention
-
-
-def random_drop_dual_attention_wrapper(
-    drop_fraction: float = 0.5, queries_rescale: float = 1.0
-) -> callable:
-    """
-    For each concept/dimension in the query embedding, we randomly drop
-    out 'drop_fraction' of the tokens (across the sequence/spatial dimension).
-    We then shift the remaining values to preserve the per-dimension mean.
-
-    In the limit of inner_dim=1, this reduces to the single-dimension case
-    (equivalent to dropping entire tokens as in the simpler implementation).
-    """
-    if queries_rescale <= 0:
-        queries_rescale = 1.0
 
     def random_drop_dual_perturbed_attention(
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        extra_options,
+        extra_options: dict,
         mask=None,
     ) -> Tensor:
         """
-        Args:
-          q, k, v: [batch_size, area, inner_dim]
-          extra_options: dict containing "n_heads", etc.
-          mask: optional attention mask
+        Applies an affine transform to the queries Q and then calls an optimized
+        attention function.
+
+        The queries are transformed as follows:
+          new_q = scaling_factor * q
+                   + translation_factor
+                   + mean_extrapolation_factor * mean(q)
+
+        Where mean(q) is computed over the tokens dimension (area), yielding
+        a per-sample global mean that is broadcast back into each token.
+
+        Parameters
+        ----------
+        q : Tensor
+            Query tensor of shape [batch_size, area, inner_dim].
+        k : Tensor
+            Key tensor of shape [batch_size, area, inner_dim].
+        v : Tensor
+            Value tensor of shape [batch_size, area, inner_dim].
+        extra_options : dict
+            Additional options for attention, must contain "n_heads" for multi-head.
+        mask : Optional[Tensor]
+            An optional attention mask to be applied in the attention step.
+
+        Returns
+        -------
+        Tensor
+            The output of the attention mechanism using the transformed queries.
         """
         heads = extra_options["n_heads"]
         bs, area, inner_dim = q.shape
 
-        # Mean of each dimension over 'area' for each batch
-        # Shape: [bs, 1, inner_dim]
-        original_q_mean = q.mean(dim=1, keepdim=True)
+        # 1) Scale q
+        new_q = q * scaling_factor
 
-        # Decide how many tokens to drop per dimension (at most area-1)
-        tokens_to_drop = min(area - 1, round(area * drop_fraction))
-        fraction = tokens_to_drop / area  # fraction in [0, 1)
+        # 2) Add translation offset (broadcast over all elements if float)
+        if translation_factor != 0.0:
+            new_q = new_q + translation_factor
 
-        # Generate random numbers to decide which tokens to drop for each (batch, token, dim)
-        # Shape: [bs, area, inner_dim]
-        rand_vals = torch.rand(bs, area, inner_dim, device=q.device)
+        # 3) Mean extrapolation: add the mean of q multiplied by factor
+        if mean_extrapolation_factor != 0.0:
+            # Mean across tokens (dim=1), keep dimension for broadcast
+            q_mean = q.mean(dim=1, keepdim=True)
+            new_q = new_q + mean_extrapolation_factor * q_mean
 
-        # If fraction > 0, find the threshold for each (batch, dim) across the 'area' dimension
-        # so that exactly 'fraction' of tokens are "dropped" (lowest random values).
-        # Shape of threshold: [bs, 1, inner_dim]
-        if fraction > 0:
-            threshold = torch.quantile(rand_vals, fraction, dim=1, keepdim=True)
-        else:
-            # fraction=0 -> no tokens to drop
-            # set threshold lower than all random values so none get dropped
-            threshold = rand_vals.amin(dim=1, keepdim=True) - 1e-8
-
-        # dropped_mask: True where the random value is <= threshold
-        dropped_mask = rand_vals <= threshold
-
-        # remain_mask: True where we keep the token, i.e. random value > threshold
-        remain_mask = ~dropped_mask  # shape: [bs, area, inner_dim]
-
-        # Zero out dropped elements in q
-        new_q = q * remain_mask
-
-        # Compute how many tokens remain for each (batch, dim)
-        # remain_counts shape: [bs, 1, inner_dim]
-        remain_counts = remain_mask.sum(dim=1, keepdim=True).clamp(min=1)
-
-        # Mean of the remaining values per dimension
-        # new_q_sum shape: [bs, 1, inner_dim]
-        new_q_sum = new_q.sum(dim=1, keepdim=True)
-        new_q_mean = new_q_sum
-
-        # Shift the kept tokens so that each dimension's mean matches the original
-        new_q += original_q_mean - new_q_mean
-        new_q *= queries_rescale
-
-        # Standard attention call with updated Q (concept-dropped & mean-shifted)
+        # Call your custom / optimized attention with the modified queries
         return optimized_attention(new_q, k, v, heads=heads, mask=mask)
 
     return random_drop_dual_perturbed_attention
+
+
+def fuzzy_attention_wrapper(
+    scaling_factor: float = 1.0, noise_std: float = 0.1
+) -> callable:
+    """
+    Returns a function that, when called, first scales the query tensor by
+    `scaling_factor` and then adds Gaussian noise with standard deviation
+    `noise_std`. The resulting 'fuzzy' queries are used in the attention step.
+
+    Parameters
+    ----------
+    scaling_factor : float
+        The factor by which to scale the query vectors (default: 1.0).
+    noise_std : float
+        Standard deviation of the Gaussian noise added to the query vectors
+        (default: 0.1).
+
+    Returns
+    -------
+    callable
+        A function that takes (q, k, v, extra_options, mask) and returns the
+        output of `optimized_attention` using the transformed queries.
+    """
+
+    def fuzzy_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        """
+        Applies a scaling and Gaussian noise perturbation to the queries
+        before calling an attention mechanism.
+
+        The queries are transformed as follows:
+          new_q = (q * scaling_factor) + N(0, noise_std^2)
+
+        Parameters
+        ----------
+        q : Tensor
+            Query tensor of shape [batch_size, area, inner_dim].
+        k : Tensor
+            Key tensor of shape [batch_size, area, inner_dim].
+        v : Tensor
+            Value tensor of shape [batch_size, area, inner_dim].
+        extra_options : dict
+            Additional options for attention, must contain "n_heads" for multi-head.
+        mask : Optional[Tensor]
+            An optional attention mask to be applied in the attention step.
+
+        Returns
+        -------
+        Tensor
+            The output of the attention mechanism using the 'fuzzy' queries.
+        """
+        heads = extra_options["n_heads"]
+
+        # Scale queries
+        new_q = q * scaling_factor
+
+        # Add Gaussian noise
+        if noise_std > 0.0:
+            noise = torch.randn_like(new_q) * noise_std
+            new_q = new_q + noise
+
+        # Call your custom attention function with the transformed queries
+        return optimized_attention(new_q, k, v, heads=heads, mask=mask)
+
+    return fuzzy_attention
 
 
 def downsampled_attention_wrapper(
@@ -557,6 +555,89 @@ def downsampled_attention_wrapper(
         return res
 
     return downsampled_attention
+
+
+def random_rotation_wrapper(
+    rotation_intensity: float = 0.0, rescale: float = 1.0
+) -> callable:
+    """
+    Returns a function that, when called, applies a random orthonormal rotation
+    in R^d to the query vectors. The rotation is parameterized by
+    rotation_intensity in [0,1], where 0 means 'no rotation' and 1 means
+    'full random rotation'.
+
+    Internally:
+      1. We generate a skew-symmetric matrix S (size d x d) once per forward pass.
+      2. For a given rotation_intensity = alpha, we compute R(alpha) = exp(alpha * S).
+      3. We apply R(alpha) to each query vector q[i].
+
+    Parameters
+    ----------
+    rotation_intensity : float
+        A scalar in [0,1]. 0 means identity transform, 1 means a random
+        orthonormal rotation given by exp(S).
+    rescale : float
+        A multiplier applied after rotation (default=1.0).
+
+    Returns
+    -------
+    callable
+        A function that takes (q, k, v, extra_options, mask) and returns the
+        output of `optimized_attention` with the queries rotated by R(alpha).
+    """
+
+    # We'll clamp alpha to [0,1] just to be safe (in case user inputs out of range).
+    alpha = max(0.0, min(1.0, rotation_intensity))
+
+    def create_random_skew_symmetric(d: int, device) -> Tensor:
+        """
+        Create a random d x d skew-symmetric matrix S by sampling a random
+        matrix A and taking S = (A - A^T)/2, ensuring S^T = -S.
+        """
+        A = torch.randn(d, d, device=device, dtype=torch.float32)
+        S = A - A.transpose(0, 1)  # Make S skew-symmetric
+        S *= 0.5
+        return S
+
+    def partial_random_orthonormal_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        """
+        Applies an orthonormal rotation R(alpha) = exp(alpha * S)
+        to each query vector in q, then calls `optimized_attention`.
+        """
+
+        heads = extra_options["n_heads"]
+        bs, area, d = q.shape
+
+        # Generate a new random skew-symmetric matrix S each forward pass
+        S = create_random_skew_symmetric(d, q.device)
+
+        if alpha == 0.0:
+            # No rotation
+            rotated_q = q
+        else:
+            # Compute exp(alpha * S) via torch.matrix_exp
+            transform_matrix = torch.matrix_exp(S * alpha)  # shape: [d, d]
+            transform_matrix = transform_matrix.to(dtype=q.dtype, device=q.device)
+
+            # Perform the rotation via a standard matrix multiplication
+            # q is [bs, area, d]. We'll treat (bs*area) as a batch dimension:
+            #   [bs*area, d] x [d, d] -> [bs*area, d]
+            # and reshape back to [bs, area, d].
+            rotated_q = q.reshape(-1, d) @ transform_matrix
+            rotated_q = rotated_q.view(bs, area, d)
+
+            if rescale != 1.0:
+                rotated_q = rotated_q * rescale
+
+        return optimized_attention(rotated_q, k, v, heads=heads, mask=mask)
+
+    return partial_random_orthonormal_attention
 
 
 def sliding_window_guidance_wrapper(

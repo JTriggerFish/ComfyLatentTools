@@ -40,7 +40,7 @@ class GenericAttentionGuidance:
                 "param2": (
                     "FLOAT",
                     {
-                        "default": -1.0,
+                        "default": 0.0,
                         "min": -1.0,
                         "max": 1.0,
                         "step": 0.01,
@@ -110,7 +110,7 @@ class GenericAttentionGuidance:
 
     @classmethod
     def help(cls):
-        return "Implementation of Smoothed Energy Guidance ( SEG ) that also incorporates the Rescale CFG approach"
+        return "Implementation of generic attention guidance, with different types of guidance and rescaling available"
 
     def patch(
         self,
@@ -118,10 +118,10 @@ class GenericAttentionGuidance:
         guidance_type: str = "SEG",
         guidance_weight: float = 1.5,
         param1: float = 0.0,
-        param2: float = -1.0,
-        param3: float = -1.0,
+        param2: float = 0.0,
+        param3: float = 0.0,
         apply_rescaling_to_alternate_guidance: bool = False,
-        rescaling_method: str = "VSpaceRescale",
+        rescaling_method: str = "None",
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
         unet_block_id: int = 0,
@@ -164,14 +164,14 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.pag_attention_wrapper()
                     case guidance.GuidanceType.SEG:
                         attention_fn = guidance.seg_attention_wrapper(param1)
-                    case guidance.GuidanceType.RANDOM_DROP:
-                        attention_fn = guidance.random_drop_attention_wrapper(
-                            param1, param2
+                    case guidance.GuidanceType.AAT:
+                        attention_fn = guidance.affine_attention_transform_wrapper(
+                            param1, param2, param3
                         )
-                    case guidance.GuidanceType.RANDOM_DROP_DUAL:
-                        attention_fn = guidance.random_drop_dual_attention_wrapper(
-                            param1, param2
-                        )
+                    case guidance.GuidanceType.FUZZY:
+                        attention_fn = guidance.fuzzy_attention_wrapper(param1, param2)
+                    case guidance.GuidanceType.RANDOM_ROTATION:
+                        attention_fn = guidance.random_rotation_wrapper(param1, param2)
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 
