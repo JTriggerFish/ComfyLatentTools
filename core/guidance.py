@@ -11,7 +11,11 @@ from comfy.ldm.modules.attention import optimized_attention
 
 # Seems like for ComfyUI / ComfyScript, only relative imports work properly
 try:
-    from .latent_filters import gaussian_blur_2d, gaussian_kernel_size_for_img
+    from .latent_filters import (
+        gaussian_blur_2d,
+        gaussian_kernel_size_for_img,
+        moment_match,
+    )
     from . import utils
 except ImportError:
     from latent_filters import gaussian_blur_2d, gaussian_kernel_size_for_img
@@ -19,18 +23,18 @@ except ImportError:
 
 
 class GuidanceType(str, enum.Enum):
+    RANDOM_ROTATION = "RandomRotation"
+    FUZZY = "Fuzzy"
+    AAT = "AAT"
     SEG = "SEG"
     PAG = "PAG"
-    AAT = "AAT"
-    SWG = "SWG"
-    FUZZY = "Fuzzy"
-    RANDOM_ROTATION = "RandomRotation"
-    DOWNSAMPLED = "Downsampled"
-    DISTANCE_WEIGHTED = "DistanceWeighted"
+    # DOWNSAMPLED = "Downsampled" # NOT IMPLEMENTED YET
+    # DISTANCE_WEIGHTED = "DistanceWeighted" #NOT IMPLEMENTED YET
 
 
 class GuidanceScalingMethod(str, enum.Enum):
     NONE = "None"
+    MOMENT_MATCH = "MomentMatch"
     PRED_SPACE_RESCALE = "PredSpaceRescale"
     V_SPACE_RESCALE = "VSpaceRescale"
     SNF = "SNF"
@@ -64,6 +68,7 @@ def snf_guidance_combine(
     alternate_pred: Tensor | None,
     alternate_pred_ref: Tensor | None,
     alternate_guidance_weight: float,
+    rescaling_fraction: float,
 ) -> Tensor:
     base = cond_pred
     cfg = max(cfg - 1, 0) * (cond_pred - uncond_pred)
@@ -75,7 +80,9 @@ def snf_guidance_combine(
             alternate_pred_ref = 0
         guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
 
-    return base + utils.saliency_tensor_combination(cfg, guidance_adj)
+    adjusted = base + utils.saliency_tensor_combination(cfg, guidance_adj)
+    simple = base + cfg * guidance_adj
+    return (1 - rescaling_fraction) * simple + rescaling_fraction * adjusted
 
 
 def softmax_guidance_combine(
@@ -87,7 +94,6 @@ def softmax_guidance_combine(
     alternate_guidance_weight: float,
     temperature: float = 1.0,
 ) -> Tensor:
-    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
 
     base = cond_pred
     cfg = max(cfg - 1, 0) * (cond_pred - uncond_pred)
@@ -131,7 +137,41 @@ def pred_rescaled_guidance_combine(
         base_guidance = utils.partial_rescaling(
             ref_tensor=cond_pred, z=base_guidance, rescaled_fraction=rescaling_fraction
         )
-        return base_guidance - guidance_adj
+        return base_guidance + guidance_adj
+
+
+def moment_match_guidance_combine(
+    cond_pred: Tensor,
+    uncond_pred: Tensor,
+    cfg: float,
+    alternate_pred: Tensor | None,
+    alternate_pred_ref: Tensor | None,
+    alternate_guidance_weight: float,
+    apply_rescaling_to_guidance: bool,
+    rescaling_fraction: float,
+) -> Tensor:
+    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
+
+    if alternate_pred is None:
+        guidance_adj = 0
+    else:
+        if alternate_pred_ref is None:
+            alternate_pred_ref = 0
+        guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
+
+    if apply_rescaling_to_guidance:
+        guidance = base_guidance + guidance_adj
+        guidance_rescaled = moment_match(cond_pred, guidance)
+        return (
+            1 - rescaling_fraction
+        ) * guidance + rescaling_fraction * guidance_rescaled
+    else:
+        base_guidance_rescaled = moment_match(cond_pred, base_guidance)
+        return (
+            (1 - rescaling_fraction) * base_guidance
+            + rescaling_fraction * base_guidance_rescaled
+            + guidance_adj
+        )
 
 
 def v_space_rescaled_guidance_combine(
@@ -238,6 +278,7 @@ def guidance_combine_and_scale(
                 alternate_pred,
                 alternate_pred_ref,
                 alternate_guidance_weight,
+                rescaling_fraction,
             )
         case GuidanceScalingMethod.SOFTMAX:
             return softmax_guidance_combine(
@@ -247,6 +288,18 @@ def guidance_combine_and_scale(
                 alternate_pred,
                 alternate_pred_ref,
                 alternate_guidance_weight,
+                temperature=rescaling_fraction,
+            )
+        case GuidanceScalingMethod.MOMENT_MATCH:
+            return moment_match_guidance_combine(
+                cond_pred,
+                uncond_pred,
+                cfg,
+                alternate_pred,
+                alternate_pred_ref,
+                alternate_guidance_weight,
+                apply_rescaling_to_guidance,
+                rescaling_fraction,
             )
         case _:
             raise ValueError(f"Unknown guidance scaling method: {scaling_method}")
@@ -426,7 +479,7 @@ def affine_attention_transform_wrapper(
 
 
 def fuzzy_attention_wrapper(
-    scaling_factor: float = 1.0, noise_std: float = 0.1
+    noise_std: float = 0.1, scaling_factor: float = 1.0
 ) -> callable:
     """
     Returns a function that, when called, first scales the query tensor by
@@ -435,11 +488,11 @@ def fuzzy_attention_wrapper(
 
     Parameters
     ----------
-    scaling_factor : float
-        The factor by which to scale the query vectors (default: 1.0).
     noise_std : float
         Standard deviation of the Gaussian noise added to the query vectors
         (default: 0.1).
+    scaling_factor : float
+        The factor by which to scale the query vectors (default: 1.0).
 
     Returns
     -------
@@ -555,6 +608,38 @@ def downsampled_attention_wrapper(
         return res
 
     return downsampled_attention
+
+
+def copy_attention_keys_queries_wrapper() -> callable:
+
+    def copy_attention_keys_queries(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        """
+        Takes a batch of size 2 and copies the keys and queries of the first batch to the second batch.
+        before calling the attention function
+        :param q:
+        :param k:
+        :param v:
+        :param extra_options:
+        :param mask:
+        :return:
+        """
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
+        assert bs == 2, "This function requires a batch size of 2"
+
+        q[1] = q[0]
+        k[1] = k[0]
+
+        # Copy the keys and queries to the value tensor
+        return optimized_attention(v, k, q, heads=heads, mask=mask)
+
+    return copy_attention_keys_queries
 
 
 def random_rotation_wrapper(

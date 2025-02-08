@@ -168,16 +168,66 @@ def latent_upscale(
     return res
 
 
-def downsample_latent(latent: torch.Tensor, factor: float) -> torch.Tensor:
+def mix_fft_phase_amplitude(
+    x: torch.Tensor, y: torch.Tensor, y_weight: float
+) -> torch.Tensor:
     """
-    Downscale an SDXL latent by 'factor' with a Gaussian pre-filter and area interpolation.
-    Ensures final shape is divisible by 8.
+    x, y: PyTorch tensors of shape (..., C, H, W) or (C, H, W)
+          representing images in the spatial domain.
+
+    Returns:
+        A torch.Tensor of the same shape as x and y, with the amplitude from x
+        and the "averaged" phase from x and y (correctly handled on the unit circle).
+    """
+    # Compute 2D FFT along the last two dimensions (height, width)
+    assert y_weight >= 0 and y_weight <= 1
+    X = torch.fft.fft2(x, dim=(-2, -1))
+    Y = torch.fft.fft2(y, dim=(-2, -1))
+
+    # Extract amplitude (magnitude) from X
+    amplitude_x = torch.abs(X)
+
+    # Extract phase (angle) from both X and Y
+    phase_x = torch.angle(X)
+    phase_y = torch.angle(Y)
+
+    # Convert phases to complex exponentials on the unit circle
+    # e^{i * phase} = cos(phase) + i sin(phase)
+    phase_x_complex = torch.complex(torch.cos(phase_x), torch.sin(phase_x))
+    phase_y_complex = torch.complex(torch.cos(phase_y), torch.sin(phase_y))
+
+    # Sum the unit vectors to get the average direction in the complex plane
+    phase_sum = (1.0 - y_weight) * phase_x_complex + y_weight * phase_y_complex
+
+    # The correct averaged phase is the argument of the sum
+    # (Dividing by 2 won't change the argument, so it's unnecessary here.)
+    phase_avg = torch.angle(phase_sum)
+
+    real_part = amplitude_x * torch.cos(phase_avg)
+    imag_part = amplitude_x * torch.sin(phase_avg)
+    mixed_fft = torch.complex(real_part, imag_part)
+
+    # Inverse FFT to go back to the spatial domain
+    mixed_spatial = torch.fft.ifft2(mixed_fft, dim=(-2, -1))
+
+    return mixed_spatial.real
+
+
+def downsample_latent(
+    latent: torch.Tensor, factor: float, filter_sigma: float
+) -> torch.Tensor:
+    """
+    Downscale a diffusion latent by 'factor' with a Gaussian pre-filter and area interpolation.
+    The filter_sigma controls the standard deviation of the Gaussian kernel used for pre-filtering.
     """
 
-    B, C, H, W = latent.shape
+    kernel_size = gaussian_kernel_size_for_img(
+        filter_sigma, latent, cap_at_half_smallest_dim=False
+    )
+    filtered_latent = gaussian_blur_2d(latent, kernel_size, filter_sigma)
 
     latent = kornia.geometry.transform.rescale(
-        latent, 1 / factor, interpolation="area", antialias=True
+        filtered_latent, 1 / factor, interpolation="area", antialias=False
     )
     return latent
 

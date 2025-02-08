@@ -144,6 +144,7 @@ class GenericAttentionGuidance:
             uncond_pred = args["uncond_denoised"]
             cond_scale = args["cond_scale"]
             cond = args["cond"]
+            uncond = args["uncond"]
             sigma = args["sigma"]
             model_options = args["model_options"]
             x = args["input"]
@@ -190,6 +191,7 @@ class GenericAttentionGuidance:
                 uncond_pred,
                 cond_scale,
                 alternate_cond_pred,
+                # alternate_uncond_pred,
                 cond_pred,
                 guidance_weight,
                 scaling_method=rescaling_method,
