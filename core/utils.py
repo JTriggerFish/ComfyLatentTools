@@ -2,7 +2,7 @@ from itertools import groupby
 
 import torch.nn.functional as F
 import torch
-from .latent_filters import gaussian_blur_2d
+from .latent_filters import gaussian_blur_2d, moment_match
 
 
 def pred_to_v(
@@ -48,10 +48,10 @@ def partial_rescaling(
     ref_tensor: torch.Tensor,
     z: torch.Tensor,
     rescaled_fraction: float,
-):
-    target_std = torch.std(ref_tensor, dim=(-3, -2, -1), keepdim=True)
-    std = torch.std(z, dim=(-3, -2, -1), keepdim=True)
-    return z * (1 - rescaled_fraction) + target_std * z / std * rescaled_fraction
+    match_mean: bool = False,
+) -> torch.Tensor:
+    rescaled = moment_match(ref_tensor, z, per_channel=True, match_mean=match_mean)
+    return rescaled_fraction * rescaled + (1 - rescaled_fraction) * z
 
 
 def saliency_tensor_combination(

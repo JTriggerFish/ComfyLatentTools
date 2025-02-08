@@ -6,6 +6,7 @@ import torch
 from kornia.filters import GaussianBlur2d
 from torch import Tensor
 from torch.nn import functional as F
+import matplotlib as plt
 
 
 def center_tensor(
@@ -86,30 +87,59 @@ def huberize_quantile(
     return y
 
 
+def normalize_tensor(
+    tensor: torch.Tensor,
+    per_channel: bool = True,
+    normalize_mean: bool = False,
+    eps: float = 1e-8,
+    target_mean: float | Tensor = 0.0,
+    target_std: float | Tensor = 1.0,
+) -> torch.Tensor:
+    """
+    Normalize a tensor to have zero mean and unit variance.
+    :param tensor:
+    :param per_channel:
+    :param eps:
+    :return:
+    """
+    if not per_channel:
+        mean = tensor.mean()
+        std = tensor.std() + eps
+    else:
+        mean = tensor.mean(dim=(-2, -1), keepdim=True)
+        std = tensor.std(dim=(-2, -1), keepdim=True) + eps
+    if normalize_mean:
+        return (tensor - mean) * target_std / std + target_mean
+    else:
+        return (tensor - mean) * target_std / std + mean
+
+
 def moment_match(
-    from_tensor: torch.Tensor, to_tensor: torch.Tensor, per_channel: bool = True
+    from_tensor: torch.Tensor,
+    to_tensor: torch.Tensor,
+    per_channel: bool = True,
+    match_mean: bool = True,
 ) -> torch.Tensor:
     """
     Match the mean and variance of a tensor to another tensor.
     :param from_tensor: The tensor to match.
-    :param to_tensor: The tensor to match to.
-    :return: The transformed tensor.
+    :param to_tensor:
+    :param per_channel:
+    :param match_mean:
     """
     if not per_channel:
-        from_mean = from_tensor.mean()
-        from_std = from_tensor.std()
-        to_mean = to_tensor.mean()
-        to_std = to_tensor.std()
-        return (to_tensor + to_mean - from_mean) * to_std / from_std
+        target_mean = from_tensor.mean()
+        target_std = from_tensor.std()
     else:
-        ret = to_tensor.clone()
-        ret += from_tensor.mean(dim=(2, 3), keepdim=True) - ret.mean(
-            dim=(2, 3), keepdim=True
-        )
-        ret *= from_tensor.std(dim=(2, 3), keepdim=True) / ret.std(
-            dim=(2, 3), keepdim=True
-        )
-        return ret
+        target_mean = from_tensor.mean(dim=(-2, -1), keepdim=True)
+        target_std = from_tensor.std(dim=(-2, -1), keepdim=True)
+    return normalize_tensor(
+        to_tensor,
+        per_channel,
+        target_mean=target_mean,
+        target_std=target_std,
+        normalize_mean=match_mean,
+    )
 
 
 def add_correlated_gaussian_noise(
@@ -280,3 +310,209 @@ def _gaussian_blur_2d_manual(img: Tensor, kernel_size: int, sigma: float) -> Ten
     img = F.conv2d(img, kernel2d, groups=img.shape[-3])
 
     return img
+
+
+def compute_cosine_distance(
+    tensorA: Tensor, tensorB: Tensor, eps=1e-8, return_similarity: bool = False
+) -> Tensor:
+    """
+    Compute element-wise cosine distance between two tensors of shape [B, C, H, W].
+    Returns a heatmap of shape [B, H, W] where each pixel is:
+        1 - cos_sim = 1 - (a·b / (||a||*||b||)).
+    """
+    # Ensure same shape
+    if tensorA.shape != tensorB.shape:
+        raise ValueError("tensorA and tensorB must have the same shape.")
+
+    # [B, C, H, W] -> (a·b) along C dimension
+    dot_product = (tensorA * tensorB).sum(dim=1)  # => [B, H, W]
+    normA = tensorA.norm(dim=1)  # => [B, H, W]
+    normB = tensorB.norm(dim=1)  # => [B, H, W]
+
+    cos_sim = dot_product / (normA * normB + eps)
+    if return_similarity:
+        return cos_sim
+    cos_dist = 1.0 - cos_sim
+    return cos_dist
+
+
+def tokens_to_spatial(x: Tensor, aspect_ratio: float) -> Tensor:
+    """
+    Beshape (B, area, dim) -> (B, dim, H, W)
+    :param x:
+    :param aspect_ratio:
+    :return:
+    """
+    bs, area, inner_dim = x.shape
+    height_orig, width_orig = int(math.sqrt(area / aspect_ratio)), int(
+        math.sqrt(area * aspect_ratio)
+    )
+    if aspect_ratio >= 1.0:
+        height = round((area / aspect_ratio) ** 0.5)
+        x = x.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
+    else:
+        width = round((area * aspect_ratio) ** 0.5)
+        x = x.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+    return x
+
+
+def spatial_to_tokens(x: Tensor) -> Tensor:
+    """
+    Reshape (B, dim, H, W) -> (B, area, dim)
+    :param x:
+    :return:
+    """
+    bs, inner_dim, height, width = x.shape
+    return x.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+
+
+def compare_kqv_resolutions(
+    k_hi: Tensor,
+    q_hi: Tensor,
+    v_hi: Tensor,  # [B, C, L_hi] each (high resolution)
+    k_lo: Tensor,
+    q_lo: Tensor,
+    v_lo: Tensor,  # [B, C, L_lo] each (low resolution)
+    aspect_ratio: float,
+    upsample_mode="bicubic",
+    attention_hi=None,  # [B, n_heads, L_hi, L_hi] (optional)
+    attention_lo=None,  # [B, n_heads, L_lo, L_lo] (optional)
+):
+    """
+    1. Reshape hi-res and lo-res (K,Q,V) to [B, C, H, W] using the given aspect ratio.
+    2. Upsample lo-res to hi-res shape.
+    3. Compute and plot cosine-distance heatmaps for K, Q, V.
+    4. Optionally compare attention maps by upsampling lo-res attention to hi-res
+       and plotting difference (or ratio).
+
+    Parameters:
+        k_hi, q_hi, v_hi:  [B, C, L_hi]
+        k_lo, q_lo, v_lo:  [B, C, L_lo]
+        aspect_ratio:      float, used to factor L into H,W
+        upsample_mode:     'nearest' or 'bicubic', etc.
+        attention_hi:      optional [B, n_heads, L_hi, L_hi]
+        attention_lo:      optional [B, n_heads, L_lo, L_lo]
+    """
+    # 1. Reshape to spatial
+    k_hi_2d = tokens_to_spatial(k_hi, aspect_ratio)  # [B, C, H_hi, W_hi]
+    q_hi_2d = tokens_to_spatial(q_hi, aspect_ratio)
+    v_hi_2d = tokens_to_spatial(v_hi, aspect_ratio)
+
+    k_lo_2d = tokens_to_spatial(k_lo, aspect_ratio)  # [B, C, H_lo, W_lo]
+    q_lo_2d = tokens_to_spatial(q_lo, aspect_ratio)
+    v_lo_2d = tokens_to_spatial(v_lo, aspect_ratio)
+
+    B, C, H_hi, W_hi = k_hi_2d.shape
+    _, _, H_lo, W_lo = k_lo_2d.shape
+
+    # 2. Upsample lo-res -> hi-res
+    scale_factor_h = H_hi / H_lo
+    scale_factor_w = W_hi / W_lo
+
+    k_lo_up = F.interpolate(
+        k_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
+    )  # [B, C, H_hi, W_hi]
+    q_lo_up = F.interpolate(q_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
+    v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
+
+    # 3. Compute cosine distance heatmaps for K, Q, V
+    k_dist = compute_cosine_distance(k_hi_2d, k_lo_up)  # [B, H_hi, W_hi]
+    q_dist = compute_cosine_distance(q_hi_2d, q_lo_up)
+    v_dist = compute_cosine_distance(v_hi_2d, v_lo_up)
+
+    # Example: Plot these heatmaps for the first item in the batch.
+    # Real usage might store them or handle multiple batch elements.
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    for ax, dist_map, title in zip(
+        axes, [k_dist, q_dist, v_dist], ["K Dist", "Q Dist", "V Dist"]
+    ):
+        ax.imshow(
+            dist_map[0].cpu().detach().numpy(), cmap="magma", interpolation="nearest"
+        )
+        ax.set_title(title)
+        ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+    # 4. Optionally compare attention maps
+    #    attention_hi: [B, n_heads, L_hi, L_hi]
+    #    attention_lo: [B, n_heads, L_lo, L_lo]
+    if attention_hi is not None and attention_lo is not None:
+        # We'll upsample attention_lo to [B, n_heads, L_hi, L_hi] by 2D interpolation.
+        # But we must treat each head [L_lo, L_lo] like an image [1, 1, H_lo, W_lo].
+        # So let's reshape to [B*n_heads, 1, L_lo_h, L_lo_w] if we want to do the same
+        # aspect-based approach. However, typically L_lo_h = L_lo_w = sqrt(L_lo),
+        # or you need a separate approach if the attention map isn't truly a 2D "image".
+
+        # For simplicity, assume L_lo = H_lo * W_lo from above.
+        # We'll just do naive approach: reshape attention to [B*n_heads, 1, H_lo, W_lo]
+        # and upsample to [B*n_heads, 1, H_hi, W_hi], then flatten back to [B, n_heads, L_hi, L_hi].
+
+        # 4a) Reshape hi attention to [B*n_heads, 1, H_hi, W_hi]
+        #     and lo attention to [B*n_heads, 1, H_lo, W_lo]
+        # We have to factor L_hi and L_lo the same way we did for K,Q,V.
+        # If the aspect ratio is the same, we can reuse tokens_to_spatial or do it manually.
+
+        # For demonstration, let's do the quick version:
+
+        B2, n_heads, L_hi2, _ = attention_hi.shape
+        B3, n_heads2, L_lo2, _ = attention_lo.shape
+        if not (B2 == B3 == B) or n_heads != n_heads2:
+            raise ValueError(
+                "Attention shapes and batch size do not match the given Q,K,V shapes."
+            )
+
+        # Factor L_hi into (H_hi, W_hi) the same way:
+        # But note that L_hi2 might be different from L_hi above if your n_heads differ or if aspect ratio differs.
+        # We'll assume we used the same approach for L_hi => H_hi, W_hi.
+        # Let's do it carefully:
+        H_hi_attn, W_hi_attn = find_hw_for_aspect_ratio(L_hi2, aspect_ratio)
+        if H_hi_attn * W_hi_attn != L_hi2:
+            raise ValueError(
+                "Cannot reshape attention_hi tokens to the same H_hi,W_hi with this aspect ratio."
+            )
+
+        H_lo_attn, W_lo_attn = find_hw_for_aspect_ratio(L_lo2, aspect_ratio)
+        if H_lo_attn * W_lo_attn != L_lo2:
+            raise ValueError(
+                "Cannot reshape attention_lo tokens to the same H_lo,W_lo with this aspect ratio."
+            )
+
+        attn_hi_2d = attention_hi.reshape(B * n_heads, L_hi2, L_hi2)
+        attn_lo_2d = attention_lo.reshape(B * n_heads, L_lo2, L_lo2)
+
+        # We need a 4D shape for interpolation: [B*n_heads, 1, H_lo_attn, W_lo_attn].
+        # But note that the attention is 2D in each dimension (query vs. key).
+        # A simpler approach is to just do a 2D interpolation for each row, but that’s more complex.
+        # We'll do a naive approach: treat each row as 1D and upsample.
+        # For a full 2D approach, we'd interpret (query index -> y-axis, key index -> x-axis)
+        # and reshape to [B*n_heads, 1, H_lo_attn, W_lo_attn], then upsample to [B*n_heads, 1, H_hi_attn, W_hi_attn].
+
+        # Quick demonstration: we can just do a normal 2D interpolation:
+        attn_hi_4d = attn_hi_2d.reshape(B * n_heads, 1, H_hi_attn, W_hi_attn)
+        attn_lo_4d = attn_lo_2d.reshape(B * n_heads, 1, H_lo_attn, W_lo_attn)
+
+        attn_lo_up = F.interpolate(
+            attn_lo_4d, size=(H_hi_attn, W_hi_attn), mode=upsample_mode
+        )
+        # Now compare attn_hi_4d vs. attn_lo_up
+        # For example, compute difference:
+        attn_diff = attn_hi_4d - attn_lo_up  # [B*n_heads, 1, H_hi_attn, W_hi_attn]
+
+        # Visualize for one example (and maybe one head):
+        fig2, axes2 = plt.subplots(1, 3, figsize=(15, 4))
+        idx = 0  # pick the first from B*n_heads
+        axes2[0].imshow(attn_hi_4d[idx, 0].cpu().detach().numpy(), cmap="viridis")
+        axes2[0].set_title("Attention Hi")
+        axes2[1].imshow(attn_lo_up[idx, 0].cpu().detach().numpy(), cmap="viridis")
+        axes2[1].set_title("Attention Lo Up")
+        diff_map = attn_diff[idx, 0].cpu().detach().numpy()
+        im = axes2[2].imshow(diff_map, cmap="bwr")
+        axes2[2].set_title("Attn Difference (Hi - LoUp)")
+        plt.colorbar(im, ax=axes2[2], fraction=0.046, pad=0.04)
+        for ax in axes2:
+            ax.axis("off")
+        plt.tight_layout()
+        plt.show()
+
+    return (k_dist, q_dist, v_dist)

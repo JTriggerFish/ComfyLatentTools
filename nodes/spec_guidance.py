@@ -152,10 +152,15 @@ class DownsampledLatentGuidance:
                 #     x, lf.gaussian_kernel_size_for_img(sigma_filter, x), sigma_filter
                 # )
 
-                ref_latent = reference_latent.to(device=cond_pred.device)
+                ref_latent = (
+                    reference_latent.to(device=cond_pred.device)
+                    * model.latent_format.scale_factor
+                )
+
                 noise = sigma.to(device=ref_latent.device) * torch.randn_like(
                     ref_latent, device=ref_latent.device
                 )
+                # Renoise the reference latent to the current noise level
                 x_reference = ref_latent + noise
 
                 # x_downscaled = kornia.geometry.transform.rescale(
@@ -178,12 +183,18 @@ class DownsampledLatentGuidance:
                     interpolation="nearest",
                     antialias=False,
                 )
-                attention_fn = guidance.random_rotation_wrapper(1.0, 1.0)
+                copy_attention = (
+                    guidance.upscale_and_transfer_previous_attention_wrapper(
+                        downsample_factor
+                    )
+                )
+
+                perturbed_attention_fn = guidance.random_rotation_wrapper(1.0, 1.0)
                 # attention_fn = guidance.fuzzy_attention_wrapper(1.0, 0.5)
                 # attention_fn = guidance.affine_attention_transform_wrapper(1.0, -100, 0)
 
                 model_options_perturbed = guidance.patch_attention_in_model_blocks(
-                    model_options, attention_fn, blocks
+                    model_options, perturbed_attention_fn, blocks
                 )
 
                 (cond_down_peturbed,) = calc_cond_batch(
@@ -212,16 +223,23 @@ class DownsampledLatentGuidance:
                 #     cond_pred + 1 * (cond_down - cond_down_peturbed),
                 #     guidance_weight,
                 # )
+                # x_reference_upscaled = kornia.geometry.transform.rescale(
+                #     x_reference,
+                #     float(downsample_factor),
+                #     interpolation="nearest",
+                #     antialias=False,
+                # )
                 final_pred = (
-                    uncond_pred
-                    + cond_scale * (cond_pred - uncond_pred)
+                    cond_pred
+                    + (cond_scale - 1) * (cond_pred - uncond_pred)
                     + guidance_weight * (cond_down - cond_down_peturbed)
                 )
-                moment_matched = lf.moment_match(cond_pred, final_pred)
-                return (
-                    final_pred * (1 - rescaling_fraction)
-                    + moment_matched * rescaling_fraction
-                )
+                return final_pred
+                # moment_matched = lf.moment_match(cond_pred, final_pred)
+                # return (
+                #     final_pred * (1 - rescaling_fraction)
+                #     + moment_matched * rescaling_fraction
+                # )
 
         m = model.clone()
         m.set_model_sampler_post_cfg_function(cfg_function)

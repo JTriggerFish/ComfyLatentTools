@@ -2,6 +2,8 @@ from comfy.model_patcher import ModelPatcher
 from comfy.samplers import calc_cond_batch
 from ..core import guidance as guidance
 from ..core import utils as utils
+import torch
+import numpy as np
 
 
 class GenericAttentionGuidance:
@@ -97,6 +99,10 @@ class GenericAttentionGuidance:
                         "round": False,
                     },
                 ),
+                "apply_cosine_schedule_to_guidance": (
+                    "BOOLEAN",
+                    {"default": False},
+                ),
             },
             "optional": {
                 "unet_block_list": ("STRING", {"default": ""}),
@@ -115,8 +121,8 @@ class GenericAttentionGuidance:
     def patch(
         self,
         model: ModelPatcher,
-        guidance_type: str = "SEG",
-        guidance_weight: float = 1.5,
+        guidance_type: str = "AAT",
+        guidance_weight: float = 2.0,
         param1: float = 0.0,
         param2: float = 0.0,
         param3: float = 0.0,
@@ -127,8 +133,29 @@ class GenericAttentionGuidance:
         unet_block_id: int = 0,
         noise_fraction_start: float = 1.0,
         noise_fraction_end: float = 0.0,
+        apply_cosine_schedule_to_guidance: bool = False,
         unet_block_list: str = "",
     ):
+        """
+
+        :param model:
+        :param guidance_type:
+        :param guidance_weight: Recommeded around 2.0
+        :param param1: 1.0 for most
+        :param param2: -100 for AAT, 0 to 1 for RandomRotation
+        :param param3:
+        :param apply_rescaling_to_alternate_guidance:
+        :param rescaling_method: Recommended : PredSpaceRescale
+        :param rescaling_fraction: Recommended : 0.7 for VSpaceRescale, 0.3-0.7 for PredSpaceRescale,
+            1.0 for Softmax ( there it is the temperature)
+        :param unet_block:
+        :param unet_block_id:
+        :param noise_fraction_start:
+        :param noise_fraction_end:
+        :param apply_cosine_schedule_to_guidance:
+        :param unet_block_list:
+        :return:
+        """
         if unet_block_list:
             blocks = utils.parse_unet_blocks(model, unet_block_list)
         else:
@@ -150,12 +177,21 @@ class GenericAttentionGuidance:
             x = args["input"]
 
             sigmas = model_options["transformer_options"]["sample_sigmas"]
+
             current_frac = sigma**2 / sigmas[0] ** 2
+            current_step = torch.where(sigmas == sigma)[0].item()
+            total_steps = len(sigmas)
+
+            if apply_cosine_schedule_to_guidance:
+                cosine_schedule = 0.5 * (1 + np.cos(np.pi * current_step / total_steps))
+                guidance_w = guidance_weight * cosine_schedule
+            else:
+                guidance_w = guidance_weight
 
             if (
                 (current_frac > noise_fraction_start)
                 or (current_frac <= noise_fraction_end)
-                or guidance_weight == 0
+                or abs(guidance_w) < 1e-6
             ):
                 # Skip
                 alternate_cond_pred = cond_pred
@@ -193,7 +229,7 @@ class GenericAttentionGuidance:
                 alternate_cond_pred,
                 # alternate_uncond_pred,
                 cond_pred,
-                guidance_weight,
+                guidance_w,
                 scaling_method=rescaling_method,
                 apply_rescaling_to_guidance=apply_rescaling_to_alternate_guidance,
                 rescaling_fraction=rescaling_fraction,

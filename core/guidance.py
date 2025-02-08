@@ -15,6 +15,9 @@ try:
         gaussian_blur_2d,
         gaussian_kernel_size_for_img,
         moment_match,
+        tokens_to_spatial,
+        spatial_to_tokens,
+        normalize_tensor,
     )
     from . import utils
 except ImportError:
@@ -34,11 +37,11 @@ class GuidanceType(str, enum.Enum):
 
 class GuidanceScalingMethod(str, enum.Enum):
     NONE = "None"
-    MOMENT_MATCH = "MomentMatch"
     PRED_SPACE_RESCALE = "PredSpaceRescale"
     V_SPACE_RESCALE = "VSpaceRescale"
     SNF = "SNF"
     SOFTMAX = "Softmax"
+    NORMALIZE = "Normalize"
 
 
 def plain_guidance_combine(
@@ -108,6 +111,45 @@ def softmax_guidance_combine(
     return base + utils.softmax_weighted_combination(cfg, guidance_adj, temperature)
 
 
+def guidance_normalize(
+    cond_pred: Tensor,
+    uncond_pred: Tensor,
+    cfg: float,
+    alternate_pred: Tensor | None,
+    alternate_pred_ref: Tensor | None,
+    alternate_guidance_weight: float,
+    apply_rescaling_to_guidance: bool,
+    rescaling_fraction: float = 1.0,
+    target_std: float = 1.0,
+    per_channel: bool = True,
+) -> Tensor:
+
+    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
+
+    if alternate_pred is None:
+        guidance_adj = 0
+    else:
+        if alternate_pred_ref is None:
+            alternate_pred_ref = 0
+        guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
+
+    if apply_rescaling_to_guidance:
+        guidance = base_guidance + guidance_adj
+        guidance = (
+            1 - rescaling_fraction
+        ) * guidance + rescaling_fraction * normalize_tensor(
+            guidance, target_std=target_std, per_channel=per_channel
+        )
+        return guidance
+    else:
+        base_guidance = (
+            1 - rescaling_fraction
+        ) * base_guidance + rescaling_fraction * normalize_tensor(
+            base_guidance, target_std=target_std, per_channel=per_channel
+        )
+        return base_guidance + guidance_adj
+
+
 def pred_rescaled_guidance_combine(
     cond_pred: Tensor,
     uncond_pred: Tensor,
@@ -130,7 +172,10 @@ def pred_rescaled_guidance_combine(
     if apply_rescaling_to_guidance:
         guidance = base_guidance + guidance_adj
         guidance = utils.partial_rescaling(
-            ref_tensor=cond_pred, z=guidance, rescaled_fraction=rescaling_fraction
+            ref_tensor=cond_pred,
+            z=guidance,
+            rescaled_fraction=rescaling_fraction,
+            match_mean=False,
         )
         return guidance
     else:
@@ -138,40 +183,6 @@ def pred_rescaled_guidance_combine(
             ref_tensor=cond_pred, z=base_guidance, rescaled_fraction=rescaling_fraction
         )
         return base_guidance + guidance_adj
-
-
-def moment_match_guidance_combine(
-    cond_pred: Tensor,
-    uncond_pred: Tensor,
-    cfg: float,
-    alternate_pred: Tensor | None,
-    alternate_pred_ref: Tensor | None,
-    alternate_guidance_weight: float,
-    apply_rescaling_to_guidance: bool,
-    rescaling_fraction: float,
-) -> Tensor:
-    base_guidance = uncond_pred + cfg * (cond_pred - uncond_pred)
-
-    if alternate_pred is None:
-        guidance_adj = 0
-    else:
-        if alternate_pred_ref is None:
-            alternate_pred_ref = 0
-        guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
-
-    if apply_rescaling_to_guidance:
-        guidance = base_guidance + guidance_adj
-        guidance_rescaled = moment_match(cond_pred, guidance)
-        return (
-            1 - rescaling_fraction
-        ) * guidance + rescaling_fraction * guidance_rescaled
-    else:
-        base_guidance_rescaled = moment_match(cond_pred, base_guidance)
-        return (
-            (1 - rescaling_fraction) * base_guidance
-            + rescaling_fraction * base_guidance_rescaled
-            + guidance_adj
-        )
 
 
 def v_space_rescaled_guidance_combine(
@@ -210,12 +221,18 @@ def v_space_rescaled_guidance_combine(
     if apply_rescaling_to_guidance:
         guidance = base_guidance + guidance_adj
         guidance = utils.partial_rescaling(
-            ref_tensor=cond, z=guidance, rescaled_fraction=rescaling_fraction
+            ref_tensor=cond,
+            z=guidance,
+            rescaled_fraction=rescaling_fraction,
+            match_mean=False,
         )
         final_pred = utils.v_to_pred(x, sigma, [guidance])[0]
     else:
         base_guidance = utils.partial_rescaling(
-            ref_tensor=cond, z=base_guidance, rescaled_fraction=rescaling_fraction
+            ref_tensor=cond,
+            z=base_guidance,
+            rescaled_fraction=rescaling_fraction,
+            match_mean=False,
         )
         final_pred = utils.v_to_pred(x, sigma, [base_guidance])[0]
         final_pred += guidance_adj
@@ -290,8 +307,8 @@ def guidance_combine_and_scale(
                 alternate_guidance_weight,
                 temperature=rescaling_fraction,
             )
-        case GuidanceScalingMethod.MOMENT_MATCH:
-            return moment_match_guidance_combine(
+        case GuidanceScalingMethod.NORMALIZE:
+            return guidance_normalize(
                 cond_pred,
                 uncond_pred,
                 cfg,
@@ -366,13 +383,7 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
         height_orig, width_orig = extra_options["original_shape"][2:4]
         aspect_ratio = width_orig / height_orig
 
-        # Reshape (B, area, dim) -> (B, dim, H, W)
-        if aspect_ratio >= 1.0:
-            height = round((area / aspect_ratio) ** 0.5)
-            q = q.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
-        else:
-            width = round((area * aspect_ratio) ** 0.5)
-            q = q.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+        q = tokens_to_spatial(q, aspect_ratio)
 
         blur_sigma = scaled_blur_sigma * math.sqrt(height_orig * width_orig * 64) / 10
 
@@ -385,8 +396,7 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
             # Negative blur_sigma => set entire q to the mean
             q[:] = q.mean(dim=(-2, -1), keepdim=True)
 
-        # Reshape back to (B, area, dim) for the attention function
-        q = q.reshape(bs, inner_dim, -1).permute(0, 2, 1)
+        q = spatial_to_tokens(q)
 
         return optimized_attention(q, k, v, heads=heads)
 
@@ -549,68 +559,37 @@ def fuzzy_attention_wrapper(
     return fuzzy_attention
 
 
-def downsampled_attention_wrapper(
-    attention: callable,
-    downsample_factor: float,
+def upscale_and_transfer_previous_attention_wrapper(
+    downsample_factor: float = 2.0,
 ) -> callable:
 
-    def downsampled_attention(
+    prev_k = None
+    prev_v = None
+    prev_q = None
+
+    def transer_attention(
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        extra_options,
+        extra_options: dict,
         mask=None,
     ) -> Tensor:
-        heads = extra_options["n_heads"]
-        bs, area, inner_dim = q.shape
-
-        height_orig, width_orig = extra_options["original_shape"][2:4]
-        aspect_ratio = width_orig / height_orig
-
-        # Reshape (B, area, dim) -> (B, dim, H, W)
-        if aspect_ratio >= 1.0:
-            height = round((area / aspect_ratio) ** 0.5)
-            # q = q.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
-            k = k.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
-            # v = v.permute(0, 2, 1).reshape(bs, inner_dim, height, -1)
+        nonlocal prev_k, prev_v, prev_q
+        if prev_k is None:
+            prev_k = k
+            prev_v = v
+            prev_q = q
+            return optimized_attention(
+                q, k, v, heads=extra_options["n_heads"], mask=mask
+            )
         else:
-            width = round((area * aspect_ratio) ** 0.5)
-            # q = q.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
-            k = k.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
-            # v = v.permute(0, 2, 1).reshape(bs, inner_dim, -1, width)
+            # TODO
+            pass
 
-        # q = kornia.geometry.resize(
-        #     q, (new_height, new_width), interpolation="area", antialias=True
-        # )
-        k = kornia.geometry.rescale(
-            k, 1 / downsample_factor, interpolation="area", antialias=True
-        )
-        k = kornia.geometry.rescale(
-            k, float(downsample_factor), interpolation="nearest", antialias=True
-        )
-        # v = kornia.geometry.resize(
-        #     v, (new_height, new_width), interpolation="area", antialias=True
-        # )
-
-        # Reshape back to (B, area, dim) for the attention function
-        # q = q.reshape(bs, inner_dim, -1).permute(0, 2, 1)
-        k = k.reshape(bs, inner_dim, -1).permute(0, 2, 1)
-        # v = v.reshape(bs, inner_dim, -1).permute(0, 2, 1)
-
-        res = attention(q, k, v, heads=heads)
-
-        # Re upsample the attention map
-        # res = res.permute(0, 2, 1).reshape(bs, inner_dim, new_height, new_width)
-        # res = kornia.geometry.resize(
-        #     res, (height, width), interpolation="area", antialias=True
-        # )
-        # res = res.reshape(bs, inner_dim, -1).permute(0, 2, 1)
-        return res
-
-    return downsampled_attention
+    return transer_attention
 
 
-def copy_attention_keys_queries_wrapper() -> callable:
+def batch_copy_attention_keys_queries_wrapper() -> callable:
 
     def copy_attention_keys_queries(
         q: Tensor,
@@ -684,7 +663,7 @@ def random_rotation_wrapper(
         S *= 0.5
         return S
 
-    def partial_random_orthonormal_attention(
+    def random_orthonormal_attention(
         q: Tensor,
         k: Tensor,
         v: Tensor,
@@ -722,7 +701,7 @@ def random_rotation_wrapper(
 
         return optimized_attention(rotated_q, k, v, heads=heads, mask=mask)
 
-    return partial_random_orthonormal_attention
+    return random_orthonormal_attention
 
 
 def sliding_window_guidance_wrapper(
