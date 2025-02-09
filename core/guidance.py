@@ -1,3 +1,4 @@
+import numpy as np
 import random
 
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
@@ -26,6 +27,7 @@ except ImportError:
 
 
 class GuidanceType(str, enum.Enum):
+    SCRAMBLE = "Scramble"
     RANDOM_ROTATION = "RandomRotation"
     FUZZY = "Fuzzy"
     AAT = "AAT"
@@ -401,6 +403,82 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
         return optimized_attention(q, k, v, heads=heads)
 
     return seg_perturbed_attention
+
+
+def scramble_attention_wrapper(
+    set_size: float = 1, value_scaling: float = 1.0
+) -> callable:
+
+    def scrambled_perturbed_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        """
+        Replaces attention with random-subset averaging of V for each query token.
+
+        For each of the M query tokens, we randomly select r = max(1, floor(fraction * T))
+        rows of V (T total), then average those r vectors to produce the output. This 
+        ignores Q entirely (no dot-products) and thus perturb" attention severely,
+        but in a structured way.
+
+        Args:
+            Q: (B, M, D)  -> B=batch_size, M=#image tokens (e.g. "areas"), D=inner_dim
+            V: (B, T, D)  -> T=#text tokens (or values) 
+            fraction: in [0,1]
+                - 0 means pick exactly 1 random value per query token,
+                - 1 means average all T values (uniform attention),
+                - anything in between picks r ~ fraction*T.
+
+        Returns:
+            out: (B, M, D)
+                The "perturbed attention" output where each query token's
+                result is a random average of value vectors.
+        """
+        b, m, d = q.shape
+        _, t, _ = v.shape
+
+        # Number of values to pick per query token
+        r = min(t, max(1, int(set_size)))
+
+        # 1) Flatten (B,T,D) => (B*T, D) for simpler gathering along dim=0
+        v_flat = v.view(b * t, d)
+
+        # 2) We need an index in [0 .. B*T) for each (b, m, r_idx).
+        #    We'll first pick random positions in [0..T) for each (b, m, r_idx),
+        #    then add an offset = b*T to shift into the [b*T .. (b+1)*T) block.
+        #
+        # Shape: (B, M, r)
+        idx_local = torch.randint(low=0, high=t, size=(b, m, r), device=v.device)
+
+        # 3) Build the batch offsets => for b in [0..B), offset = b*T
+        #    We want shape (B,1,1) so it can broadcast to (B,M,r)
+        batch_offsets = (torch.arange(b, device=v.device) * t).view(b, 1, 1)
+        # expand to (B, M, r), then add
+        idx_global = idx_local + batch_offsets
+
+        # 4) Flatten idx_global => shape (B*M*r,) so we can gather in one shot
+        idx_flat = idx_global.view(-1)
+
+        # 5) Gather from V_flat => shape (B*M*r, D)
+        subset_vals = v_flat[idx_flat, :]
+
+        # 6) Reshape => (B, M, r, D)
+        subset_vals = subset_vals.view(b, m, r, d)
+
+        # 7) Average over r => (B, M, D)
+        out = subset_vals.mean(dim=2)
+
+        # If we assume that the keys are independent,
+        # to keep the same std as choosing a single value, we need to scale by sqrt(r)
+        out *= np.sqrt(r) * value_scaling
+
+        return out
+
+    return scrambled_perturbed_attention
 
 
 def affine_attention_transform_wrapper(

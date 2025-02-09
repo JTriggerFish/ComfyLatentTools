@@ -197,6 +197,10 @@ class GenericAttentionGuidance:
                 alternate_cond_pred = cond_pred
             else:
                 match guidance_type:
+                    case guidance.GuidanceType.SCRAMBLE:
+                        attention_fn = guidance.scramble_attention_wrapper(
+                            param1, param2
+                        )
                     case guidance.GuidanceType.PAG:
                         attention_fn = guidance.pag_attention_wrapper()
                     case guidance.GuidanceType.SEG:
