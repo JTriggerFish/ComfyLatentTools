@@ -106,19 +106,6 @@ $$
 
 
 
-## Why is guidance rescaling best done in v-pred space
-A shown in [2](#ref2), the v-prediction velocity is essentially the velocity of the discretized ODE that needs to be solved to sample at inference.
-A heuristic argument is that we can tweak the direction of this vector to change the trajectory of the denoising path without affecting the convergence of the integration scheme significantly.
-
-However, chaging the magnitude of this vector will cause over or under shooting the trajectory and either fail to converge or diverge, causing the "burnt" saturated images where the latent vectors get clipped to their max values.
-
-Therefore, whenever we combine prediction targets using alternate guidance such as Perturbed Attention or Smoothed Energy Guidance, it is best to do the combination in the v-prediction space and rescale to match the original 
-v-prediction magnitude.
-
-We can then convert the v-prediction back to denoised estimate and follow the rest ot the sampling process.
-
-
-
 # References
 <a id="ref1"></a>
 - [1]Efficient Diffusion Training via Min-SNR Weighting Strategy [paper](https://arxiv.org/abs/2303.09556)
