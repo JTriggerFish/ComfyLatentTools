@@ -1,12 +1,33 @@
-# Some Comfy friendly maths
-[Bacl to main page](README.md)
+---
+layout: default
+title: ""Scrambled Attention Guidance"
+toc: true            # Enables automatic table of contents generation (using kramdown)
+---
 
+[Bacl to main page](..\README.md)
+<!-- Draft Warning Banner -->
+<div style="border: 2px solid red; background-color: #ffe6e6; padding: 15px; text-align: center; margin-bottom: 20px;">
+  <h2 style="margin-top: 0;">Draft Document</h2>
+  <p>Please note that this document is a very rough draft. The content is incomplete and subject to change.</p>
+</div>
+
+# Scrambled Attention Guidance
+
+
+[//]: # (<!-- Table of Contents -->)
+
+[//]: # (* [Table of Contents]&#40;#table-of-contents&#41;)
+
+[//]: # (  {:toc})
+
+
+# Background
 ## General diffusion models formulation
 
 There are various approaches and formulations in the literature and reverse engineering which one
 best matches with functions and parameter names found in ComfyUI diffusion related code can be quite painful.
 
-Here I attempt to show a parametrisation that closely maps to important parts of the  ComfyUI code.
+Here I attempt to show a parametrisation that closely maps to important parts of the ComfyUI code.
 
 ### Model
 
@@ -14,7 +35,7 @@ We assume that our data, in this case images, follows some unknown and intractab
 Let $x$ be an arbitrary sample from this distribution $x \sim p(x)$ \
 Since we can always rescale it we may WLOG assume that its standard deviation $\text{std}(x)=1$.
 
-In diffusion models we seek to build progressively noisier latent variables indexed by time 
+In diffusion models we seek to build progressively noisier latent variables indexed by time
 $$
 \begin{align}
 z_t &= \alpha_t x + \sigma_t \epsilon_t, \\
@@ -67,11 +88,11 @@ This is actually fairly simple to do, we just need to add the conditioning infor
 
 ## Some key estimates, and model training.
 
-From the above formulation it is immediate that 
+From the above formulation it is immediate that
 
 $$ x = \frac{z_t - \sigma_t \epsilon_t}{\alpha_t}$$
 
-and thus 
+and thus
 $$
 \mathbb{E}[x|z_t] = \frac{z_t - \sigma_t \mathbb{E}[\epsilon_t | z_t] }{\alpha_t}
 $$
@@ -100,10 +121,12 @@ Note that rearranging the above formula we get that
 $$
 \begin{align}
 \hat{v_t} &= \frac{1}{\sigma_t^2} \left( \alpha_t \mathbb{E}[x|z_t] - z_t \right)  \\
-        &= - \frac{\hat{\epsilon}}{\sigma_t} 
+&= - \frac{\hat{\epsilon}}{\sigma_t}
 \end{align}
 $$
 
+# Scrambled Attention Guidance
+TODO
 
 
 # References

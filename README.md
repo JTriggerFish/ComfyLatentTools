@@ -18,9 +18,9 @@ A set of custom nodes for ComfyUI, providing a specialized **Latent Normalized L
 1. Download or clone this repository into your ComfyUI's `custom_nodes` folder.
 2. Restart ComfyUI. The node(s) will appear in the **image/upscaling** category.
 
-## Optional math notes
-[Some Comfy friendly maths](some_maths.md)
 ## Node Overview
+
+MANY MISSING NODES HERE - WILL BE UPDATED
 
 ### Rescaled PAG ( Perturbed Attention Guidance )
 

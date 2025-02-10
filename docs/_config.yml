@@ -1,0 +1,4 @@
+# _config.yml
+title: "Scrambled Attention"
+description: "A very work in progress informal paper on Scrambled Attention guidance"
+theme: jekyll-theme-slate
