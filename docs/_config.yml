@@ -1,16 +1,16 @@
 # _config.yml
 title: "Scrambled Attention Guidance"
 description: "An ML research paper written in Markdown with LaTeX, images, and a table of contents."
-theme: jekyll-theme-slate
+theme: jekyll-theme-slate       # A clean, professional theme; try others if you prefer.
 markdown: kramdown
-# Kramdown settings ensure math is processed with MathJax
+# Kramdown settings: enable MathJax and set TOC options.
 kramdown:
   input: GFM
   math_engine: mathjax
   syntax_highlighter_opts:
     disable: true
+  toc_levels: 2..6             # Which header levels to include in the table of contents.
 permalink: pretty
 
-# Optional: You can add custom CSS overrides by placing a file in "assets/css/custom.scss"
 sass:
   style: compressed
