@@ -40,7 +40,7 @@ z_t &= \alpha_t x + \sigma_t \epsilon_t, \\
 \end{align}
 $$
 where the $\epsilon_t$ are standard normal noise samples that are independent of $x$, and $\alpha_t$ and $\sigma_t$ are functions of time,
-with $\sigma_t$ strictly increasing in $t$.\
+with $\sigma_t$ strictly increasing in $t$.
 
 This latent model is in fact an integrated form of a stochastic differential equation (SDE) with a time dependent diffusion coefficient.\
 The time index $t$ is in an arbitrary range $[0,T]$ where we may take $T=1$ for simplicity - note that by the time change property of Brownian motions,
