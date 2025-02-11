@@ -29,14 +29,12 @@ Since we can always rescale it we may WLOG assume that its standard deviation $\
 
 In diffusion models we seek to build progressively noisier latent variables indexed by time
 
-{% raw %}
 $$
 \begin{align}
 z_t &= \alpha_t\, x + \sigma_t\, \epsilon_t, \\
 \epsilon_t &\sim \mathcal{N}(0,1)
 \end{align}
 $$
-{% endraw %}
 
 where the $\epsilon_t$ are standard normal noise samples that are independent of $x$, and $\alpha_t$ and $\sigma_t$ are functions of time,
 with $\sigma_t$ strictly increasing in $t$.
@@ -50,11 +48,9 @@ By independence, we have that $\text{var}(z_T) = \alpha_t^2 + \sigma_t^2$. \
 At the last step we want the latent variable to be almost pure noise so we set $\alpha_T << 1$ and $\sigma_T \approx \Sigma^2$. \
 In the variance preserving formulation we keep the variance of the latent variable constant, i.e.
 
-{% raw %}
 $$
 \forall t, \quad \text{var}(z_t) = \Sigma^2 = \sigma_T^2.
 $$
-{% endraw %}
 
 Depending on the formulation we may take $\alpha_T = 0$ exactly ( "Zero Signal to Noise Ratio" or ZSNR ) or not, this has important implications that we sidestep here.
 
@@ -67,11 +63,9 @@ Note that we can normalize any of the samples $z_t$ to have unit variance by div
 So far we have built some variables $z_t$ that are progressively noisier versions of the original image $x$.\
 $z_0$ is almost exactly the original image, and $z_T$ is almost pure noise, and it is easy to show that
 
-{% raw %}
 $$
 \forall s>t, \quad z_s = \frac{\alpha_s}{\alpha_t}\, z_t + \sqrt{\sigma_s^2 - \left(\frac{\alpha_s}{\alpha_t}\right)^2 \sigma_t^2}\,\epsilon_{s\rightarrow t},
 $$
-{% endraw %}
 
 were $\epsilon_{s\rightarrow t}$ is still a standard normal random variable independent of $z_t$. 
 
@@ -103,27 +97,25 @@ This is actually fairly simple to do, we just need to add the conditioning infor
 
 From the above formulation it is immediate that
 
-{% raw %}
 $$
 x = \frac{z_t - \sigma_t \epsilon_t}{\alpha_t},
 $$
-{% endraw %}
 
 and thus
 
-{% raw %}
 $$
 \mathbb{E}[x|z_t] = \frac{z_t - \sigma_t \mathbb{E}[\epsilon_t | z_t] }{\alpha_t}
 $$
-{% endraw %}
 
-Here $\mathbb{E}[\epsilon_t | z_t]$ is the quantity that eps-prediction models try to estimate, with 
+Here 
+$$
+\mathbb{E}[\epsilon_t | z_t]
+$$
+is the quantity that eps-prediction models try to estimate, with 
 
-{% raw %}
 $$
 \hat{\epsilon}_{\theta}(z_t, \sigma_t) \approx \mathbb{E}[\epsilon_t | z_t]
 $$
-{% endraw %}
 
 where 
 $\hat{\epsilon}_{\theta}(z_t, \sigma_t)$ is the model's noise prediction for the current time step, using fitted neural network parameters $\theta$.
@@ -146,25 +138,21 @@ In typical model training we aim to minimise the weighted sum of the MSE between
 Using Tweedie's formula we can compute another estimate of the conditional expectation of $x$ given $z_t$.
 (See [here](https://www.weideng.org/posts/tweedie_formula/) for a detailed derivation):
 
-{% raw %}
 $$
 \mathbb{E}[x|z_t] = \frac{1}{\alpha_t} \left( z_t + \sigma_t^2 \nabla_{z_t} \log p(z_t) \right)
 $$
-{% endraw %}
 
 Let $\hat{v_t} = \nabla_{z_t} \log p(z_t)$ be the v-prediction vector.\
 We can equivalently fit the model to predict this vector instead, this is equivalent to reweighting the loss function that we fit the model to minimize.
 
 indeed, note that rearranging the above formula we get that
 
-{% raw %}
 $$
 \begin{align}
 \hat{v_t} &= \frac{1}{\sigma_t^2} \left( \alpha_t \mathbb{E}[x|z_t] - z_t \right)  \\
 &= - \frac{\hat{\epsilon}}{\sigma_t}
 \end{align}
 $$
-{% endraw %}
 
 # Scrambled Attention Guidance
 TODO
