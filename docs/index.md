@@ -1,23 +1,20 @@
 ---
 layout: default
 title: "Scrambled Attention Guidance"
-toc: true            # Enables automatic table of contents generation (using kramdown)
+liquid: false           # Disable Liquid processing so math is left untouched.
+toc: true               # Enable automatic table of contents generation (via kramdown)
 ---
 
 <!-- Draft Warning Banner -->
 <div style="border: 2px solid red; background-color: #ffe6e6; padding: 15px; text-align: center; margin-bottom: 20px;">
   <h2 style="margin-top: 0;">Draft Document</h2>
-  <p>Please note that this document is a very rough draft. The content is incomplete and subject to change.</p>
+  <p>This document is a draft. Content is incomplete and subject to change.</p>
 </div>
 
 # Scrambled Attention Guidance
 
-
-[//]: # (<!-- Table of Contents -->)
-
-[//]: # (* [Table of Contents]&#40;#table-of-contents&#41;)
-
-[//]: # (  {:toc})
+* [Table of Contents](#table-of-contents)
+  {:toc}
 
 
 # Background

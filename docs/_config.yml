@@ -1,8 +1,16 @@
-title: "Scrambled Attention"
-description: "A very work in progress informal paper on Scrambled Attention Guidance"
+# _config.yml
+title: "Scrambled Attention Guidance"
+description: "An ML research paper written in Markdown with LaTeX, images, and a table of contents."
 theme: jekyll-theme-slate
-
 markdown: kramdown
+# Kramdown settings ensure math is processed with MathJax
 kramdown:
+  input: GFM
   math_engine: mathjax
-  input: GFM   # optional, if you prefer GitHub-Flavored Markdown
+  syntax_highlighter_opts:
+    disable: true
+permalink: pretty
+
+# Optional: You can add custom CSS overrides by placing a file in "assets/css/custom.scss"
+sass:
+  style: compressed
