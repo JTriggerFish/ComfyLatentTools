@@ -4,5 +4,5 @@ description: "A very work in progress informal paper on Scrambled Attention guid
 theme: jekyll-theme-slate
 markdown: kramdown
 kramdown:
-  input: GFM
+#  input: GFM
   math_engine: mathjax
