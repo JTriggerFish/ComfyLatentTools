@@ -114,15 +114,16 @@ $$
 $\mathbb{E}[\epsilon_t | z_t]$ is the quantitiy that eps-prediction models try to estimate, with 
 
 $$
-\hat{\epsilon}_\theta(z_t, \sigma_t) \approx \mathbb{E}[\epsilon_t | z_t]
+\hat{\epsilon}_{\theta}(z_t, \sigma_t) \approx \mathbb{E}[\epsilon_t | z_t]
 $$
-
-$\hat{\epsilon}_\theta(z_t, \sigma_t)$ is the model's noise prediction for the current time step, using fitted neural network parameters $\theta$.
+where 
+$\hat{\epsilon}_{\theta}(z_t, \sigma_t)$ is the model's noise prediction for the current time step, using fitted neural network parameters $\theta$.
 
 $\mathbb{E}[x|z_t]$ is the denoised output or prediction of the diffusion model at time $t$.
 
 Note that the divison by $\alpha_t$ is a problem at the last step, since $\alpha_T$ is very small, or even zero for ZSNR models. \
-However this rescaling is not necessary and is not done in the ComfyUI implementation, there the "denoised output" is simply $z_t  - \sigma_t  \hat{\epsilon}_\theta(z_t, \sigma_t)$.
+However this rescaling is not necessary and is not done in the ComfyUI implementation, there the "denoised output" is simply 
+$z_t  - \sigma_t  \hat{\epsilon}_{\theta}(z_t, \sigma_t)$.
 
 TODO CHECK WHETHER THE RESCALING HAPPENS SOMEWHERE ELSE IN THE SAMPLER OR BEFORE THE VAE DECODING
 
