@@ -128,7 +128,10 @@ $$
 where 
 $\hat{\epsilon}_{\theta}(z_t, \sigma_t)$ is the model's noise prediction for the current time step, using fitted neural network parameters $\theta$.
 
-$\mathbb{E}\left[ x | z_t\right]$ is the denoised output or prediction of the diffusion model at time $t$.
+$$
+\mathbb{E}\left[x | z_t \right]
+$$ 
+is the denoised output or prediction of the diffusion model at time $t$.
 
 Note that the divison by $\alpha_t$ is a problem at the last step, since $\alpha_T$ is very small, or even zero for ZSNR models. \
 However this rescaling is not necessary and is not done in the ComfyUI implementation, there the "denoised output" is simply 
