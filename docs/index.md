@@ -32,12 +32,14 @@ Let $x$ be an arbitrary sample from this distribution $x \sim p(x)$ \
 Since we can always rescale it we may WLOG assume that its standard deviation $\text{std}(x)=1$.
 
 In diffusion models we seek to build progressively noisier latent variables indexed by time
+
 $$
 \begin{align}
 z_t &= \alpha_t x + \sigma_t \epsilon_t, \\
 \epsilon_t &\sim N(0,1)
 \end{align}
 $$
+
 where the $\epsilon_t$ are standard normal noise samples that are independent of $x$, and $\alpha_t$ and $\sigma_t$ are functions of time,
 with $\sigma_t$ strictly increasing in $t$.
 
@@ -49,7 +51,10 @@ rescaling time is equivalent to rescaling the diffusion coefficient.
 By independence, we have that $\text{var}(z_T) = \alpha_t^2 + \sigma_t^2$. \
 At the last step we want the latent variable to be almost pure noise so we set $\alpha_T << 1$ and $\sigma_T \approx \Sigma^2$. \
 In the variance preserving formulation we keep the variance of the latent variable constant, i.e.
-$$\forall t, \text{var}(z_t) = \Sigma^2 = \sigma_T^2$$
+
+$$
+\forall t, \text{var}(z_t) = \Sigma^2 = \sigma_T^2
+$$
 
 Depending on the formulation we may take $\alpha_T = 0$ exactly ( "Zero Signal to Noise Ratio" or ZSNR ) or not, this has important implications that we sidestep here.
 
@@ -62,7 +67,10 @@ Note that we can normalize any of the samples $z_t$ to have unit variance by div
 So far we have built some variables $z_t$ that are progressively noisier versions of the original image $x$.\
 $z_0$ is almost exactly the original image, and $z_T$ is almost pure noise, and it is easy to show that
 
-$$\forall s>t, z_s = \frac{\alpha_s}{\alpha_t} z_t + \sqrt{\sigma_s^2 - \left(\frac{\alpha_s}{\alpha_t}\right)^2 \sigma_t^2} \epsilon_{s\rightarrow t}$$
+$$
+\forall s>t, z_s = \frac{\alpha_s}{\alpha_t} z_t + \sqrt{\sigma_s^2 - \left(\frac{\alpha_s}{\alpha_t}\right)^2 \sigma_t^2} \epsilon_{s\rightarrow t}
+$$
+
 were $\epsilon_{s\rightarrow t}$ is still a standard normal random variable independent of $z_t$. 
 
 In other words, we can build the final pure noise image iteratively by a forward diffusion process starting from the original image and adding more and more noise.
@@ -98,6 +106,7 @@ x = \frac{z_t - \sigma_t \epsilon_t}{\alpha_t}
 $$
 
 and thus
+
 $$
 \mathbb{E}[x|z_t] = \frac{z_t - \sigma_t \mathbb{E}[\epsilon_t | z_t] }{\alpha_t}
 $$
@@ -126,6 +135,7 @@ Let $\hat{v_t} = \nabla_{z_t} \log p(z_t)$ be the v-prediction vector.\
 We can equivalently fit the model to predict this vector instead, this is equivalent to reweighting the loss function that we fit the model to minimize.
 
 indeed, note that rearranging the above formula we get that
+
 $$
 \begin{align}
 \hat{v_t} &= \frac{1}{\sigma_t^2} \left( \alpha_t \mathbb{E}[x|z_t] - z_t \right)  \\
