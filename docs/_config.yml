@@ -2,3 +2,7 @@
 title: "Scrambled Attention"
 description: "A very work in progress informal paper on Scrambled Attention guidance"
 theme: jekyll-theme-slate
+markdown: kramdown
+kramdown:
+  input: GFM
+  math_engine: mathjax
