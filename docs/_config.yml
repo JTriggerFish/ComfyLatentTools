@@ -1,8 +1,8 @@
-# _config.yml
 title: "Scrambled Attention"
-description: "A very work in progress informal paper on Scrambled Attention guidance"
+description: "A very work in progress informal paper on Scrambled Attention Guidance"
 theme: jekyll-theme-slate
+
 markdown: kramdown
 kramdown:
-#  input: GFM
   math_engine: mathjax
+  input: GFM   # optional, if you prefer GitHub-Flavored Markdown
