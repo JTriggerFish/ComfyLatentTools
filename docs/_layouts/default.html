@@ -3,20 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <title>{{ page.title }}</title>
-    <!-- MathJax configuration -->
-    <script>
-        window.MathJax = {
-            tex: {
-                // Enable both $...$ and \(...\) for inline math,
-                // and both $$...$$ and \[...\] for display math.
-                inlineMath: [['$', '$'], ['\\(', '\\)']],
-                displayMath: [['$$', '$$'], ['\\[', '\\]']]
-            }
-        };
-    </script>
-    <!-- Include MathJax -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.0/es5/tex-mml-chtml.js" async></script>
-    <!-- Your CSS and other head elements -->
+    <!-- KaTeX CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <!-- KaTeX auto-render extension -->
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js"
+            onload="renderMathInElement(document.body, {delimiters: [
+          {left: '$$', right: '$$', display: true},
+          {left: '$', right: '$', display: false},
+          {left: '\\(', right: '\\)', display: false},
+          {left: '\\[', right: '\\]', display: true}
+      ]});"></script>
+    <!-- Other head elements -->
 </head>
 <body>
 {{ content }}
