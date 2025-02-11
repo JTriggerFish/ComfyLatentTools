@@ -4,7 +4,6 @@ title: ""Scrambled Attention Guidance"
 toc: true            # Enables automatic table of contents generation (using kramdown)
 ---
 
-[Bacl to main page](..\README.md)
 <!-- Draft Warning Banner -->
 <div style="border: 2px solid red; background-color: #ffe6e6; padding: 15px; text-align: center; margin-bottom: 20px;">
   <h2 style="margin-top: 0;">Draft Document</h2>

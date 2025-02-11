@@ -3,6 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <title>{{ page.title }}</title>
+    <!-- MathJax configuration -->
+    <script>
+        window.MathJax = {
+            tex: {
+                // Enable both $...$ and \(...\) for inline math,
+                // and both $$...$$ and \[...\] for display math.
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']]
+            }
+        };
+    </script>
     <!-- Include MathJax -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.0/es5/tex-mml-chtml.js" async></script>
     <!-- Your CSS and other head elements -->
