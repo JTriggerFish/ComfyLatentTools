@@ -1,6 +1,6 @@
 ---
 layout: default
-title: ""Scrambled Attention Guidance"
+title: "Scrambled Attention Guidance"
 toc: true            # Enables automatic table of contents generation (using kramdown)
 ---
 
@@ -111,7 +111,7 @@ $$
 \mathbb{E}[x|z_t] = \frac{z_t - \sigma_t \mathbb{E}[\epsilon_t | z_t] }{\alpha_t}
 $$
 
-Here $\mathbb{E}[\epsilon_t | z_t]$ is the quantitiy that eps-prediction models try to estimate, with 
+Here $\mathbb{E}[\epsilon_t | z_t]$ is the quantity that eps-prediction models try to estimate, with 
 
 $$
 \hat{\epsilon}_{\theta}(z_t, \sigma_t) \approx \mathbb{E}[\epsilon_t | z_t]
