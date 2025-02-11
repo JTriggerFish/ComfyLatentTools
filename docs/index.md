@@ -111,7 +111,10 @@ $$
 \mathbb{E}[x|z_t] = \frac{z_t - \sigma_t \mathbb{E}[\epsilon_t | z_t] }{\alpha_t}
 $$
 
-$\mathbb{E}[\epsilon_t | z_t]$ is the quantitiy that eps-prediction models try to estimate, with $\hat{\epsilon}_\theta(z_t, \sigma_t) \sim \mathbb{E}[\epsilon_t | z_t]$.\
+$\mathbb{E}[\epsilon_t | z_t]$ is the quantitiy that eps-prediction models try to estimate, with 
+$$
+\hat{\epsilon}_\theta(z_t, \sigma_t) \approx \mathbb{E}[\epsilon_t | z_t]
+$$
 $\hat{\epsilon}_\theta(z_t, \sigma_t)$ is the model's noise prediction for the current time step, using fitted neural network parameters $\theta$.\
 $\mathbb{E}[x|z_t]$ is the denoised output or prediction of the diffusion model at time $t$.\
 
