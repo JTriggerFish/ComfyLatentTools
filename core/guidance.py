@@ -687,9 +687,18 @@ def upscale_and_transfer_previous_attention_wrapper(
                 k_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
             )  # [B, C, H_hi, W_hi]
             v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
-            blend = 0.5
-            q_2d = blend * q_lo_up + (1 - blend) * q_2d
-            k_2d = blend * k_lo_up + (1 - blend) * k_2d
+            blend = 0.9
+
+            # Create a random mask with the same shape as the tensors
+            mask_q = torch.rand_like(q_lo_up) < blend
+            mask_k = torch.rand_like(q_lo_up) < blend
+
+            # Use the mask to select between the two tensors for each pixel
+            q_2d = torch.where(mask_q, q_lo_up, q_2d)
+            k_2d = torch.where(mask_k, k_lo_up, k_2d)
+
+            # q_2d = blend * q_lo_up + (1 - blend) * q_2d
+            # k_2d = blend * k_lo_up + (1 - blend) * k_2d
             # v_2d = blend * v_lo_up + (1 - blend) * v_2d
             q = spatial_to_tokens(q_2d)
             k = spatial_to_tokens(k_2d)
