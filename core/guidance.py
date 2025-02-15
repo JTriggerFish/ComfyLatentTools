@@ -1,6 +1,7 @@
 import numpy as np
 import random
 
+import latent_filters
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
 import kornia.geometry
@@ -9,6 +10,7 @@ import torch
 import math
 import enum
 from comfy.ldm.modules.attention import optimized_attention
+from torch.nn import functional as F
 
 # Seems like for ComfyUI / ComfyScript, only relative imports work properly
 try:
@@ -641,9 +643,9 @@ def upscale_and_transfer_previous_attention_wrapper(
     downsample_factor: float = 2.0,
 ) -> callable:
 
-    prev_k = None
-    prev_v = None
-    prev_q = None
+    prev_k: None | Tensor = None
+    prev_v: None | Tensor = None
+    prev_q: None | Tensor = None
 
     def transer_attention(
         q: Tensor,
@@ -661,8 +663,43 @@ def upscale_and_transfer_previous_attention_wrapper(
                 q, k, v, heads=extra_options["n_heads"], mask=mask
             )
         else:
-            # TODO
-            pass
+            upsample_mode = "bicubic"
+            height_orig, width_orig = extra_options["original_shape"][2:4]
+            aspect_ratio = width_orig / height_orig
+            q_lo_2d = tokens_to_spatial(prev_q, aspect_ratio)
+            q_2d = tokens_to_spatial(q, aspect_ratio)
+            k_lo_2d = tokens_to_spatial(prev_k, aspect_ratio)
+            k_2d = tokens_to_spatial(k, aspect_ratio)
+            v_lo_2d = tokens_to_spatial(prev_v, aspect_ratio)
+            v_2d = tokens_to_spatial(v, aspect_ratio)
+
+            B, C, H_hi, W_hi = q_2d.shape
+            _, _, H_lo, W_lo = q_lo_2d.shape
+
+            # 2. Upsample lo-res -> hi-res
+            scale_factor_h = H_hi / H_lo
+            scale_factor_w = W_hi / W_lo
+
+            q_lo_up = F.interpolate(
+                q_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
+            )  # [B, C, H_hi, W_hi]
+            k_lo_up = F.interpolate(
+                k_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
+            )  # [B, C, H_hi, W_hi]
+            v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
+            blend = 0.5
+            q_2d = blend * q_lo_up + (1 - blend) * q_2d
+            k_2d = blend * k_lo_up + (1 - blend) * k_2d
+            # v_2d = blend * v_lo_up + (1 - blend) * v_2d
+            q = spatial_to_tokens(q_2d)
+            k = spatial_to_tokens(k_2d)
+            # v = spatial_to_tokens(v_2d)
+            # latent_filters.compare_kqv_resolutions(
+            #     k, q, v, prev_k, prev_q, prev_v, aspect_ratio
+            # )
+            return optimized_attention(
+                q, k, v, heads=extra_options["n_heads"], mask=mask
+            )
 
     return transer_attention
 

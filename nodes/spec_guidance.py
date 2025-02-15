@@ -177,27 +177,21 @@ class DownsampledLatentGuidance:
                     sigma,
                     model_options,
                 )
-                cond_down = kornia.geometry.transform.rescale(
-                    cond_down,
-                    float(downsample_factor),
-                    interpolation="nearest",
-                    antialias=False,
-                )
+                # cond_down = kornia.geometry.transform.rescale(
+                #     cond_down,
+                #     float(downsample_factor),
+                #     interpolation="nearest",
+                #     antialias=False,
+                # )
                 copy_attention = (
                     guidance.upscale_and_transfer_previous_attention_wrapper(
                         downsample_factor
                     )
                 )
-
-                perturbed_attention_fn = guidance.random_rotation_wrapper(1.0, 1.0)
-                # attention_fn = guidance.fuzzy_attention_wrapper(1.0, 0.5)
-                # attention_fn = guidance.affine_attention_transform_wrapper(1.0, -100, 0)
-
                 model_options_perturbed = guidance.patch_attention_in_model_blocks(
-                    model_options, perturbed_attention_fn, blocks
+                    model_options, copy_attention, blocks
                 )
-
-                (cond_down_peturbed,) = calc_cond_batch(
+                (_,) = calc_cond_batch(
                     model,
                     [cond],
                     # x_downscaled,
@@ -205,34 +199,19 @@ class DownsampledLatentGuidance:
                     sigma,
                     model_options_perturbed,
                 )
-                # uncond_down = kornia.geometry.transform.rescale(
-                #     uncond_down,
-                #     float(downsample_factor),
-                #     interpolation="bicubic",
-                #     antialias=False,
-                # )
-                cond_down_peturbed = kornia.geometry.transform.rescale(
-                    cond_down_peturbed,
-                    float(downsample_factor),
-                    interpolation="nearest",
-                    antialias=False,
+                (cond_modified,) = calc_cond_batch(
+                    model,
+                    [cond],
+                    # x_downscaled,
+                    x,
+                    sigma,
+                    model_options_perturbed,
                 )
 
-                # return lf.mix_fft_phase_amplitude(
-                #     uncond_pred + cond_scale * (cond_pred - uncond_pred),
-                #     cond_pred + 1 * (cond_down - cond_down_peturbed),
-                #     guidance_weight,
-                # )
-                # x_reference_upscaled = kornia.geometry.transform.rescale(
-                #     x_reference,
-                #     float(downsample_factor),
-                #     interpolation="nearest",
-                #     antialias=False,
-                # )
                 final_pred = (
                     cond_pred
                     + (cond_scale - 1) * (cond_pred - uncond_pred)
-                    + guidance_weight * (cond_down - cond_down_peturbed)
+                    + guidance_weight * (cond_modified - cond_pred)
                 )
                 return final_pred
                 # moment_matched = lf.moment_match(cond_pred, final_pred)

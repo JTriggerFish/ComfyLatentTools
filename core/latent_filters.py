@@ -6,7 +6,7 @@ import torch
 from kornia.filters import GaussianBlur2d
 from torch import Tensor
 from torch.nn import functional as F
-import matplotlib as plt
+import matplotlib.pyplot as plt
 
 
 def center_tensor(
@@ -416,9 +416,11 @@ def compare_kqv_resolutions(
     v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
 
     # 3. Compute cosine distance heatmaps for K, Q, V
-    k_dist = compute_cosine_distance(k_hi_2d, k_lo_up)  # [B, H_hi, W_hi]
-    q_dist = compute_cosine_distance(q_hi_2d, q_lo_up)
-    v_dist = compute_cosine_distance(v_hi_2d, v_lo_up)
+    k_dist = compute_cosine_distance(
+        k_hi_2d, k_lo_up, return_similarity=False
+    )  # [B, H_hi, W_hi]
+    q_dist = compute_cosine_distance(q_hi_2d, q_lo_up, return_similarity=False)
+    v_dist = compute_cosine_distance(v_hi_2d, v_lo_up, return_similarity=False)
 
     # Example: Plot these heatmaps for the first item in the batch.
     # Real usage might store them or handle multiple batch elements.
