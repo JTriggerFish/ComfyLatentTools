@@ -117,7 +117,7 @@ def parse_unet_blocks(model, unet_block_list: str):
 
     # Get all Self-attention blocks
     input_blocks, middle_blocks, output_blocks = [], [], []
-    for name, module in model.diffusion_model.named_modules():
+    for name, module in model.model.diffusion_model.named_modules():
         if module.__class__.__name__ == "CrossAttention" and name.endswith("attn1"):
             parts = name.split(".")
             block_name = parts[0]

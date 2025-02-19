@@ -179,7 +179,7 @@ class GenericAttentionGuidance:
             sigmas = model_options["transformer_options"]["sample_sigmas"]
 
             current_frac = sigma**2 / sigmas[0] ** 2
-            current_step = torch.where(sigmas == sigma)[0].item()
+            current_step = torch.argmin(torch.abs(sigmas - sigma)).item()
             total_steps = len(sigmas)
 
             if apply_cosine_schedule_to_guidance:
@@ -213,13 +213,28 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.fuzzy_attention_wrapper(param1, param2)
                     case guidance.GuidanceType.RANDOM_ROTATION:
                         attention_fn = guidance.random_rotation_wrapper(param1, param2)
+                    case guidance.GuidanceType.PERMUTE:
+                        attention_fn = guidance.permute_attention_wrapper(
+                            param1, param2
+                        )
+                    case guidance.GuidanceType.VALUE_RESCALE:
+                        attention_fn = guidance.value_rescale_attention_wrapper(
+                            param1, param2, param3
+                        )
+                    case guidance.GuidanceType.TSG:
+                        attention_fn = None
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 
-                model_options = guidance.patch_attention_in_model_blocks(
-                    model_options, attention_fn, blocks
-                )
+                if attention_fn is not None:
+                    model_options = guidance.patch_attention_in_model_blocks(
+                        model_options, attention_fn, blocks
+                    )
 
+                if guidance_type == guidance.GuidanceType.TSG:
+                    sigma = (sigma + param1 * torch.randn_like(sigma)).clamp(
+                        sigmas[-2], sigmas[0]
+                    )
                 (alternate_cond_pred,) = calc_cond_batch(
                     model, [cond], x, sigma, model_options
                 )

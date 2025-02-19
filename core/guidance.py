@@ -2,6 +2,7 @@ import numpy as np
 import random
 
 import latent_filters
+from comfy.ldm.pixart.blocks import MultiHeadCrossAttention
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
 import kornia.geometry
@@ -29,12 +30,15 @@ except ImportError:
 
 
 class GuidanceType(str, enum.Enum):
+    VALUE_RESCALE = "ValueRescale"
+    TSG = "TSG"
     SCRAMBLE = "Scramble"
     RANDOM_ROTATION = "RandomRotation"
     FUZZY = "Fuzzy"
     AAT = "AAT"
     SEG = "SEG"
     PAG = "PAG"
+    PERMUTE = "Permute"
     # DOWNSAMPLED = "Downsampled" # NOT IMPLEMENTED YET
     # DISTANCE_WEIGHTED = "DistanceWeighted" #NOT IMPLEMENTED YET
 
@@ -88,7 +92,7 @@ def snf_guidance_combine(
         guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
 
     adjusted = base + utils.saliency_tensor_combination(cfg, guidance_adj)
-    simple = base + cfg * guidance_adj
+    simple = base + cfg + guidance_adj
     return (1 - rescaling_fraction) * simple + rescaling_fraction * adjusted
 
 
@@ -476,11 +480,156 @@ def scramble_attention_wrapper(
 
         # If we assume that the keys are independent,
         # to keep the same std as choosing a single value, we need to scale by sqrt(r)
-        out *= np.sqrt(r) * value_scaling
+        mean = out.mean()
+        out = (out - mean) * np.sqrt(r) * value_scaling + mean
 
         return out
 
     return scrambled_perturbed_attention
+
+
+def permute_attention_wrapper(
+    permute_mix: float = 1.0, value_scaling: float = 1.0
+) -> callable:
+
+    def permuted_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        """
+        Randomly permute the values before computing attention.
+        """
+        _, t, _ = v.shape
+        perm = torch.randperm(t, device=v.device)
+        permuted_v = v[:, perm, :]
+        new_v = permute_mix * permuted_v + (1 - permute_mix) * v
+        new_v *= value_scaling
+        return optimized_attention(q, k, new_v, heads=heads)
+
+    return permuted_attention
+
+
+def affine_attention_transform_wrapper(
+    scaling_factor: float = 1.0,
+    translation_factor: float = 0.0,
+    mean_extrapolation_factor: float = 0.0,
+) -> callable:
+    """
+
+    A perturbed attention function that applies an affine transformation to the queries before calling the attention
+
+    Parameters
+    ----------
+    scaling_factor : float
+        Multiplier applied to the query vectors (default: 1.0).
+    translation_factor : float
+        Constant added to every element of the query vectors (default: 0.0).
+    mean_extrapolation_factor : float
+        Weight of the global mean of Q that is added to each query vector
+        (default: 0.0).
+
+    Returns
+    -------
+    callable
+        A function that takes (q, k, v, extra_options, mask) and returns the
+        output of `optimized_attention` using the transformed queries.
+    """
+
+    def random_drop_dual_perturbed_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        """
+        Applies an affine transform to the queries Q and then calls an optimized
+        attention function.
+
+        The queries are transformed as follows:
+          new_q = scaling_factor * q
+                   + translation_factor
+                   + mean_extrapolation_factor * mean(q)
+
+        Where mean(q) is computed over the tokens dimension (area), yielding
+        a per-sample global mean that is broadcast back into each token.
+
+        Parameters
+        ----------
+        q : Tensor
+            Query tensor of shape [batch_size, area, inner_dim].
+        k : Tensor
+            Key tensor of shape [batch_size, area, inner_dim].
+        v : Tensor
+            Value tensor of shape [batch_size, area, inner_dim].
+        extra_options : dict
+            Additional options for attention, must contain "n_heads" for multi-head.
+        mask : Optional[Tensor]
+            An optional attention mask to be applied in the attention step.
+
+        Returns
+        -------
+        Tensor
+            The output of the attention mechanism using the transformed queries.
+        """
+        heads = extra_options["n_heads"]
+        bs, area, inner_dim = q.shape
+
+        # 1) Scale q
+        new_q = q * scaling_factor
+
+        # 2) Add translation offset (broadcast over all elements if float)
+        if translation_factor != 0.0:
+            new_q = new_q + translation_factor
+
+        # 3) Mean extrapolation: add the mean of q multiplied by factor
+        if mean_extrapolation_factor != 0.0:
+            # Mean across tokens (dim=1), keep dimension for broadcast
+            q_mean = q.mean(dim=1, keepdim=True)
+            new_q = new_q + mean_extrapolation_factor * q_mean
+
+        # Call your custom / optimized attention with the modified queries
+        return optimized_attention(new_q, k, v, heads=heads, mask=mask)
+
+    return random_drop_dual_perturbed_attention
+
+
+def value_rescale_attention_wrapper(
+    scaling_factor: float = 1.0,
+    global_random_scaling_std: float = 0.0,
+    local_random_scaling_std: float = 0.0,
+) -> callable:
+
+    def scaled_values_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        """
+        Randomly permute the values before computing attention.
+        """
+        orig_dtype = v.dtype
+        global_scaling = scaling_factor * torch.exp(
+            torch.randn(1, device=v.device) * global_random_scaling_std
+            - 0.5 * global_random_scaling_std**2
+        ).clamp(0.01, 100.0)
+        local_scaling = torch.exp(
+            torch.randn(v.shape, device=v.device) * local_random_scaling_std
+            - 0.5 * local_random_scaling_std**2
+        ).clamp(0.01, 100.0)
+        new_v = global_scaling * local_scaling * v
+        new_v = new_v.to(orig_dtype)
+
+        return optimized_attention(q, k, new_v, heads=heads)
+
+    return scaled_values_attention
 
 
 def affine_attention_transform_wrapper(
@@ -647,7 +796,7 @@ def upscale_and_transfer_previous_attention_wrapper(
     prev_v: None | Tensor = None
     prev_q: None | Tensor = None
 
-    def transer_attention(
+    def transfer_attention(
         q: Tensor,
         k: Tensor,
         v: Tensor,
@@ -666,42 +815,42 @@ def upscale_and_transfer_previous_attention_wrapper(
             upsample_mode = "bicubic"
             height_orig, width_orig = extra_options["original_shape"][2:4]
             aspect_ratio = width_orig / height_orig
-            q_lo_2d = tokens_to_spatial(prev_q, aspect_ratio)
-            q_2d = tokens_to_spatial(q, aspect_ratio)
-            k_lo_2d = tokens_to_spatial(prev_k, aspect_ratio)
-            k_2d = tokens_to_spatial(k, aspect_ratio)
-            v_lo_2d = tokens_to_spatial(prev_v, aspect_ratio)
-            v_2d = tokens_to_spatial(v, aspect_ratio)
+            # q_lo_2d = tokens_to_spatial(prev_q, aspect_ratio)
+            # q_2d = tokens_to_spatial(q, aspect_ratio)
+            # k_lo_2d = tokens_to_spatial(prev_k, aspect_ratio)
+            # k_2d = tokens_to_spatial(k, aspect_ratio)
+            # v_lo_2d = tokens_to_spatial(prev_v, aspect_ratio)
+            # v_2d = tokens_to_spatial(v, aspect_ratio)
+            q_lo, k_lo, v_lo = prev_q, prev_k, prev_v
 
-            B, C, H_hi, W_hi = q_2d.shape
-            _, _, H_lo, W_lo = q_lo_2d.shape
+            b, tokens, dim = q.shape
+            b_lo, tokens_lo, dim_lo = q_lo.shape
+            assert dim == dim_lo
+            assert b == b_lo
+            heads = extra_options["n_heads"]
+            dim_head = dim // heads
+            attn = torch.nn.MultiheadAttention(dim, heads, device=q.device)
+            attn_lo, attn_map_lo = attn(q_lo, k_lo, v_lo, need_weights=True)
+            attn_hi, attn_map_hi = attn(q, k, v, need_weights=True)
 
-            # 2. Upsample lo-res -> hi-res
-            scale_factor_h = H_hi / H_lo
-            scale_factor_w = W_hi / W_lo
+            # B, C, H_hi, W_hi = q_2d.shape
+            # _, _, H_lo, W_lo = q_lo_2d.shape
 
-            q_lo_up = F.interpolate(
-                q_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
-            )  # [B, C, H_hi, W_hi]
-            k_lo_up = F.interpolate(
-                k_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
-            )  # [B, C, H_hi, W_hi]
-            v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
-            blend = 0.9
+            # # 2. Upsample lo-res -> hi-res
+            # scale_factor_h = H_hi / H_lo
+            # scale_factor_w = W_hi / W_lo
 
-            # Create a random mask with the same shape as the tensors
-            mask_q = torch.rand_like(q_lo_up) < blend
-            mask_k = torch.rand_like(q_lo_up) < blend
+            # q_lo_up = F.interpolate(
+            #     q_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
+            # )  # [B, C, H_hi, W_hi]
+            # k_lo_up = F.interpolate(
+            #     k_lo_2d, size=(H_hi, W_hi), mode=upsample_mode
+            # )  # [B, C, H_hi, W_hi]
+            # v_lo_up = F.interpolate(v_lo_2d, size=(H_hi, W_hi), mode=upsample_mode)
 
-            # Use the mask to select between the two tensors for each pixel
-            q_2d = torch.where(mask_q, q_lo_up, q_2d)
-            k_2d = torch.where(mask_k, k_lo_up, k_2d)
+            # q = spatial_to_tokens(q_2d)
+            # k = spatial_to_tokens(k_2d)
 
-            # q_2d = blend * q_lo_up + (1 - blend) * q_2d
-            # k_2d = blend * k_lo_up + (1 - blend) * k_2d
-            # v_2d = blend * v_lo_up + (1 - blend) * v_2d
-            q = spatial_to_tokens(q_2d)
-            k = spatial_to_tokens(k_2d)
             # v = spatial_to_tokens(v_2d)
             # latent_filters.compare_kqv_resolutions(
             #     k, q, v, prev_k, prev_q, prev_v, aspect_ratio
@@ -710,7 +859,7 @@ def upscale_and_transfer_previous_attention_wrapper(
                 q, k, v, heads=extra_options["n_heads"], mask=mask
             )
 
-    return transer_attention
+    return transfer_attention
 
 
 def batch_copy_attention_keys_queries_wrapper() -> callable:
