@@ -616,6 +616,7 @@ def value_rescale_attention_wrapper(
         Randomly permute the values before computing attention.
         """
         orig_dtype = v.dtype
+        mean = v.mean()
         global_scaling = scaling_factor * torch.exp(
             torch.randn(1, device=v.device) * global_random_scaling_std
             - 0.5 * global_random_scaling_std**2
@@ -624,7 +625,7 @@ def value_rescale_attention_wrapper(
             torch.randn(v.shape, device=v.device) * local_random_scaling_std
             - 0.5 * local_random_scaling_std**2
         ).clamp(0.01, 100.0)
-        new_v = global_scaling * local_scaling * v
+        new_v = global_scaling * local_scaling * (v - mean) + mean
         new_v = new_v.to(orig_dtype)
 
         return optimized_attention(q, k, new_v, heads=heads)
