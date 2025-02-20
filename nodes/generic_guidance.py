@@ -1,3 +1,4 @@
+from comfy.ldm.flux.math import attention
 from comfy.model_patcher import ModelPatcher
 from comfy.samplers import calc_cond_batch
 from ..core import guidance as guidance
@@ -103,6 +104,16 @@ class GenericAttentionGuidance:
                     "BOOLEAN",
                     {"default": False},
                 ),
+                "time_perturbation_std": (
+                    "FLOAT",
+                    {
+                        "default": 0.00,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "round": False,
+                    },
+                ),
             },
             "optional": {
                 "unet_block_list": ("STRING", {"default": ""}),
@@ -134,6 +145,7 @@ class GenericAttentionGuidance:
         noise_fraction_start: float = 1.0,
         noise_fraction_end: float = 0.0,
         apply_cosine_schedule_to_guidance: bool = False,
+        time_perturbation_std: float = 0.05,
         unet_block_list: str = "",
     ):
         """
@@ -221,8 +233,10 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.value_rescale_attention_wrapper(
                             param1, param2, param3
                         )
-                    case guidance.GuidanceType.TSG:
-                        attention_fn = None
+                    case guidance.GuidanceType.RANDOM_DROP:
+                        attention_fn = guidance.random_drop_wrapper(
+                            param1, param2, param3
+                        )
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 
@@ -231,10 +245,14 @@ class GenericAttentionGuidance:
                         model_options, attention_fn, blocks
                     )
 
-                if guidance_type == guidance.GuidanceType.TSG:
-                    sigma = (sigma + param1 * torch.randn_like(sigma)).clamp(
-                        sigmas[-2], sigmas[0]
-                    )
+                if time_perturbation_std > 0:
+                    sigma = (
+                        sigma
+                        * torch.exp(
+                            time_perturbation_std * torch.randn_like(sigma)
+                            - 0.5 * time_perturbation_std**2
+                        )
+                    ).clamp(sigmas[-1], sigmas[0])
                 (alternate_cond_pred,) = calc_cond_batch(
                     model, [cond], x, sigma, model_options
                 )

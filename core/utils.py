@@ -49,8 +49,11 @@ def partial_rescaling(
     z: torch.Tensor,
     rescaled_fraction: float,
     match_mean: bool = False,
+    per_channel: bool = True,
 ) -> torch.Tensor:
-    rescaled = moment_match(ref_tensor, z, per_channel=True, match_mean=match_mean)
+    rescaled = moment_match(
+        ref_tensor, z, per_channel=per_channel, match_mean=match_mean
+    )
     return rescaled_fraction * rescaled + (1 - rescaled_fraction) * z
 
 

@@ -31,7 +31,6 @@ except ImportError:
 
 class GuidanceType(str, enum.Enum):
     VALUE_RESCALE = "ValueRescale"
-    TSG = "TSG"
     SCRAMBLE = "Scramble"
     RANDOM_ROTATION = "RandomRotation"
     FUZZY = "Fuzzy"
@@ -39,6 +38,7 @@ class GuidanceType(str, enum.Enum):
     SEG = "SEG"
     PAG = "PAG"
     PERMUTE = "Permute"
+    RANDOM_DROP = "RandomDrop"
     # DOWNSAMPLED = "Downsampled" # NOT IMPLEMENTED YET
     # DISTANCE_WEIGHTED = "DistanceWeighted" #NOT IMPLEMENTED YET
 
@@ -204,6 +204,7 @@ def v_space_rescaled_guidance_combine(
     alternate_guidance_weight: float,
     apply_rescaling_to_guidance: bool,
     rescaling_fraction: float,
+    per_channel: bool = True,
 ) -> Tensor:
     # Reshape sigma to match the dimensions of the input tensor
     sigma = sigma.view(sigma.shape[:1] + (1,) * (cond_pred.ndim - 1))
@@ -233,6 +234,7 @@ def v_space_rescaled_guidance_combine(
             z=guidance,
             rescaled_fraction=rescaling_fraction,
             match_mean=False,
+            per_channel=per_channel,
         )
         final_pred = utils.v_to_pred(x, sigma, [guidance])[0]
     else:
@@ -241,6 +243,7 @@ def v_space_rescaled_guidance_combine(
             z=base_guidance,
             rescaled_fraction=rescaling_fraction,
             match_mean=False,
+            per_channel=per_channel,
         )
         final_pred = utils.v_to_pred(x, sigma, [base_guidance])[0]
         final_pred += guidance_adj
@@ -718,26 +721,14 @@ def affine_attention_transform_wrapper(
 
 
 def fuzzy_attention_wrapper(
-    noise_std: float = 0.1, scaling_factor: float = 1.0
+    noise_std: float = 1.0, scaling_factor: float = 1.0
 ) -> callable:
     """
-    Returns a function that, when called, first scales the query tensor by
-    `scaling_factor` and then adds Gaussian noise with standard deviation
-    `noise_std`. The resulting 'fuzzy' queries are used in the attention step.
+    Add noise to the values
 
-    Parameters
-    ----------
-    noise_std : float
-        Standard deviation of the Gaussian noise added to the query vectors
-        (default: 0.1).
-    scaling_factor : float
-        The factor by which to scale the query vectors (default: 1.0).
-
-    Returns
-    -------
-    callable
-        A function that takes (q, k, v, extra_options, mask) and returns the
-        output of `optimized_attention` using the transformed queries.
+    :param noise_std:
+    :param scaling_factor:
+    :return:
     """
 
     def fuzzy_attention(
@@ -747,43 +738,57 @@ def fuzzy_attention_wrapper(
         extra_options: dict,
         mask=None,
     ) -> Tensor:
-        """
-        Applies a scaling and Gaussian noise perturbation to the queries
-        before calling an attention mechanism.
-
-        The queries are transformed as follows:
-          new_q = (q * scaling_factor) + N(0, noise_std^2)
-
-        Parameters
-        ----------
-        q : Tensor
-            Query tensor of shape [batch_size, area, inner_dim].
-        k : Tensor
-            Key tensor of shape [batch_size, area, inner_dim].
-        v : Tensor
-            Value tensor of shape [batch_size, area, inner_dim].
-        extra_options : dict
-            Additional options for attention, must contain "n_heads" for multi-head.
-        mask : Optional[Tensor]
-            An optional attention mask to be applied in the attention step.
-
-        Returns
-        -------
-        Tensor
-            The output of the attention mechanism using the 'fuzzy' queries.
-        """
         heads = extra_options["n_heads"]
 
         # Scale queries
-        new_q = q * scaling_factor
+        new_v = v * scaling_factor
 
         # Add Gaussian noise
         if noise_std > 0.0:
-            noise = torch.randn_like(new_q) * noise_std
-            new_q = new_q + noise
+            noise = torch.randn_like(new_v) * noise_std
+            new_v += +noise
 
         # Call your custom attention function with the transformed queries
-        return optimized_attention(new_q, k, v, heads=heads, mask=mask)
+        return optimized_attention(q, k, new_v, heads=heads, mask=mask)
+
+    return fuzzy_attention
+
+
+def random_drop_wrapper(
+    drop_percentage: float = 0.5,
+    rescale: float = 1.0,
+    replacement_std_mult: float = 0.0,
+) -> callable:
+    """
+    Drop a random subset of the values before computing attention.
+    """
+
+    def fuzzy_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+
+        b, t, d = v.shape
+        r = max(0, min(int(drop_percentage * t), t))
+        idx = torch.randperm(t, device=v.device)[:r]
+        # Generate random samples following the Gaussian distribution
+        # mean = v.mean(dim=1, keepdim=True)
+        # std = v.std(dim=1, keepdim=True)
+        std = v.std()
+        mean = v.mean()
+        random_samples = mean + replacement_std_mult * std * torch.randn_like(v)
+
+        # Replace the dropped values with the random samples
+        new_v = v.clone()
+        new_v[:, idx, :] = random_samples[:, idx, :]
+        new_v *= rescale
+
+        # Call your custom attention function with the transformed queries
+        return optimized_attention(q, k, new_v, heads=heads, mask=mask)
 
     return fuzzy_attention
 
