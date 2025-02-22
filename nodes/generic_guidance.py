@@ -194,9 +194,19 @@ class GenericAttentionGuidance:
             current_step = torch.argmin(torch.abs(sigmas - sigma)).item()
             total_steps = len(sigmas)
 
+            # guidance_schedule_weight = 1 - exp_linear_schedule(
+            #     current_step, total_steps, alpha=-3
+            # )
+
             if apply_cosine_schedule_to_guidance:
-                cosine_schedule = 0.5 * (1 + np.cos(np.pi * current_step / total_steps))
-                guidance_w = guidance_weight * cosine_schedule
+                # cosine_schedule = 1 - 0.5 * (
+                #     1 + np.cos(np.pi * current_step / total_steps)
+                # )
+                # guidance_w = guidance_weight * cosine_schedule
+                guidance_w = guidance_weight * exp_linear_schedule(
+                    current_step, total_steps, alpha=10
+                )
+                # guidance_w = guidance_weight * float(sigmas[0] - sigma)
             else:
                 guidance_w = guidance_weight
 
@@ -237,6 +247,14 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.random_drop_wrapper(
                             param1, param2, param3
                         )
+                    case guidance.GuidanceType.SVD:
+                        attention_fn = guidance.value_svd_attention_wrapper(
+                            max(0, int(param1)), param2
+                        )
+                    case guidance.GuidanceType.RANDOM_SUBSPACE:
+                        attention_fn = guidance.random_subspace_projection_wrapper(
+                            max(0, int(param1)), param2
+                        )
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 
@@ -276,6 +294,54 @@ class GenericAttentionGuidance:
         m = model.clone()
         m.set_model_sampler_post_cfg_function(cfg_function)
         return (m,)
+
+
+def exp_linear_schedule(
+    step: int,
+    total_steps: int,
+    min_val: float = 0.0,
+    max_val: float = 1.0,
+    alpha: float = 0.0,
+) -> float:
+    """
+    Returns a value in [min_val, max_val] at integer 'step' (0 <= step < total_steps).
+    Interpolates between linear (alpha=0) and exponential-like shape (alpha>0).
+
+    fraction(t; alpha) = (1 - exp(-alpha * t)) / (1 - exp(-alpha)), where t = step / (total_steps - 1).
+
+    Args:
+        step (int): Current step, 0 <= step < total_steps.
+        total_steps (int): Total number of steps.
+        min_val (float): The minimum output value.
+        max_val (float): The maximum output value.
+        alpha (float): Shape parameter.
+            - alpha = 0   => purely linear (in the limit sense).
+            - alpha > 0   => more exponential-like.
+
+    Returns:
+        float: Scheduled value at the given step.
+
+    Raises:
+        ValueError: If step is out of range or total_steps < 1.
+    """
+    if step < 0 or step >= total_steps:
+        raise ValueError(f"step={step} must be in [0, {total_steps-1}].")
+    if total_steps < 2:
+        return float(max_val)
+
+    t = step / (total_steps - 1)
+
+    if alpha == 0.0:
+        fraction = t
+    else:
+        denom = 1.0 - np.exp(-alpha)
+        if abs(denom) < 1e-12:
+            fraction = t
+        else:
+            fraction = (1.0 - np.exp(-alpha * t)) / denom
+
+    val = min_val + fraction * (max_val - min_val)
+    return float(val)
 
 
 NODE_CLASS_MAPPINGS = {

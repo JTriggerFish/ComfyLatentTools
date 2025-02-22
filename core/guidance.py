@@ -39,6 +39,8 @@ class GuidanceType(str, enum.Enum):
     PAG = "PAG"
     PERMUTE = "Permute"
     RANDOM_DROP = "RandomDrop"
+    RANDOM_SUBSPACE = "RandomSubspace"
+    SVD = "SVD"
     # DOWNSAMPLED = "Downsampled" # NOT IMPLEMENTED YET
     # DISTANCE_WEIGHTED = "DistanceWeighted" #NOT IMPLEMENTED YET
 
@@ -516,91 +518,6 @@ def permute_attention_wrapper(
     return permuted_attention
 
 
-def affine_attention_transform_wrapper(
-    scaling_factor: float = 1.0,
-    translation_factor: float = 0.0,
-    mean_extrapolation_factor: float = 0.0,
-) -> callable:
-    """
-
-    A perturbed attention function that applies an affine transformation to the queries before calling the attention
-
-    Parameters
-    ----------
-    scaling_factor : float
-        Multiplier applied to the query vectors (default: 1.0).
-    translation_factor : float
-        Constant added to every element of the query vectors (default: 0.0).
-    mean_extrapolation_factor : float
-        Weight of the global mean of Q that is added to each query vector
-        (default: 0.0).
-
-    Returns
-    -------
-    callable
-        A function that takes (q, k, v, extra_options, mask) and returns the
-        output of `optimized_attention` using the transformed queries.
-    """
-
-    def random_drop_dual_perturbed_attention(
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        extra_options: dict,
-        mask=None,
-    ) -> Tensor:
-        """
-        Applies an affine transform to the queries Q and then calls an optimized
-        attention function.
-
-        The queries are transformed as follows:
-          new_q = scaling_factor * q
-                   + translation_factor
-                   + mean_extrapolation_factor * mean(q)
-
-        Where mean(q) is computed over the tokens dimension (area), yielding
-        a per-sample global mean that is broadcast back into each token.
-
-        Parameters
-        ----------
-        q : Tensor
-            Query tensor of shape [batch_size, area, inner_dim].
-        k : Tensor
-            Key tensor of shape [batch_size, area, inner_dim].
-        v : Tensor
-            Value tensor of shape [batch_size, area, inner_dim].
-        extra_options : dict
-            Additional options for attention, must contain "n_heads" for multi-head.
-        mask : Optional[Tensor]
-            An optional attention mask to be applied in the attention step.
-
-        Returns
-        -------
-        Tensor
-            The output of the attention mechanism using the transformed queries.
-        """
-        heads = extra_options["n_heads"]
-        bs, area, inner_dim = q.shape
-
-        # 1) Scale q
-        new_q = q * scaling_factor
-
-        # 2) Add translation offset (broadcast over all elements if float)
-        if translation_factor != 0.0:
-            new_q = new_q + translation_factor
-
-        # 3) Mean extrapolation: add the mean of q multiplied by factor
-        if mean_extrapolation_factor != 0.0:
-            # Mean across tokens (dim=1), keep dimension for broadcast
-            q_mean = q.mean(dim=1, keepdim=True)
-            new_q = new_q + mean_extrapolation_factor * q_mean
-
-        # Call your custom / optimized attention with the modified queries
-        return optimized_attention(new_q, k, v, heads=heads, mask=mask)
-
-    return random_drop_dual_perturbed_attention
-
-
 def value_rescale_attention_wrapper(
     scaling_factor: float = 1.0,
     global_random_scaling_std: float = 0.0,
@@ -635,6 +552,251 @@ def value_rescale_attention_wrapper(
     return scaled_values_attention
 
 
+def rank_k_svd_approx(M, k=2, niter=2):
+    """
+    Compute a rank-k approximation of M via truncated SVD (torch.svd_lowrank).
+    M: (T, D) float tensor
+    k:  integer <= min(T, D)
+    niter: number of power-iteration refinements for the lowrank SVD
+    Returns:
+      U:  (T, k)
+      S:  (k,)
+      V:  (D, k)
+    so that M_k = (U * S) @ V^T is the rank-k approximation.
+    """
+    # Safeguard rank
+    k = min(k, min(M.shape[0], M.shape[1]))
+
+    orig_dtype = M.dtype
+    M = M.to(torch.float32)
+    # Use PyTorch's truncated SVD
+    U, S, V = torch.svd_lowrank(M, q=k, niter=niter)
+    # shapes:
+    #  U: (T, k)
+    #  S: (k,)
+    #  V: (D, k)
+    U = U.to(orig_dtype)
+    S = S.to(orig_dtype)
+    V = V.to(orig_dtype)
+
+    return U, S, V
+
+
+def rank_k_svd_approx_full(M: torch.Tensor, k: int):
+    """
+    Uses the full SVD (torch.linalg.svd) to get a rank-k approximation.
+    M: (T, D) float tensor
+    k: number of singular components to keep (<= min(T, D))
+
+    Returns:
+      U_k: (T, k)
+      S_k: (k,)
+      V_k: (D, k)
+    so M_approx = (U_k * S_k) @ V_k.T is the rank-k reconstruction.
+    """
+    orig_dtype = M.dtype
+    M = M.to(torch.float32)
+    T, D = M.shape
+    # Clamp k to min(T, D)
+    r = min(T, D)
+    k = min(k, r)
+
+    # Perform full SVD
+    # U: (T, r),  S: (r,),  Vh: (r, D)
+    U, S, Vh = torch.linalg.svd(M, full_matrices=False)
+
+    # Slice out the top-k
+    U_k = U[:, :k]  # (T, k)
+    S_k = S[:k]  # (k,)
+    # Vh[:k, :] => (k, D), so we transpose to get V_k => (D, k)
+    V_k = Vh[:k, :].transpose(-2, -1)
+
+    U_k = U_k.to(orig_dtype)
+    S_k = S_k.to(orig_dtype)
+    V_k = V_k.to(orig_dtype)
+
+    return U_k, S_k, V_k
+
+
+def project_onto_cols(X, U):
+    """
+    Project X (T, D) onto the column-space of U (T, k), which has orthonormal columns.
+    The result is in the same shape (T, D).
+    i.e.  Proj_{U}(X) = U (U^T X).
+    We'll do this with matmul.
+    """
+    # U^T X => shape (k, D)
+    # then U * that => (T, D)
+    return U @ (U.transpose(-2, -1) @ X)
+
+
+def add_orthogonal_noise_rankk(M, rank=2, niter_svd=2, noise_scaling=1.0):
+    """
+    1) Get rank-k approximation of M via truncated SVD
+    2) Compute residual R = M - M_k
+    3) Match R's mean/std -> generate random noise
+    4) Remove top-k subspace from that noise (so it's orth to the principal components)
+    5) Combine M_k + noise_orth.
+
+    M: (T, D)
+    rank: how many singular components to keep
+    niter_svd: passes for truncated SVD
+    Returns:
+      M_k (rank-k approx),
+      noise_orth (final noise in orth subspace),
+      M_noisy = M_k + noise_orth
+    """
+    T, D = M.shape
+
+    # ---- (1) SVD for rank-k
+    U, S, V = rank_k_svd_approx(M, k=rank, niter=niter_svd)
+    # U, S, V = rank_k_svd_approx_full(M, k=rank)
+    # Reconstruct rank-k portion: M_k = U * diag(S) * V^T
+    # We'll do (U * S) => (T, k), then matmul with V^T => (T, D)
+    M_k = (U * S) @ V.transpose(-2, -1)
+
+    # ---- (2) Residual & stats
+    R = M - M_k
+    r_std = R.std(unbiased=False)
+
+    if noise_scaling <= 0:
+        return M_k, torch.zeros_like(M), M_k
+
+    # ---- (3) Generate random noise that matches R's mean/std
+    noise = torch.randn_like(M) * noise_scaling * r_std
+
+    # ---- (4) Remove top-k subspace from noise
+    # The top-k subspace on the left side is spanned by columns of U.
+    # We'll do noise_orth = noise - Proj_{U}(noise).
+    # Provided U has orthonormal columns, project_onto_cols(noise, U) yields
+    #   the portion inside the top-k space, so subtract it out.
+    noise_proj = project_onto_cols(noise, U)  # shape (T, D)
+    noise_orth = noise - noise_proj
+
+    # Optionally re-scale once again if you want exact mean/std in the orth space.
+    # We'll do a single pass for demonstration:
+    n_std = noise_orth.std(unbiased=False)
+    if n_std > 1e-12:
+        noise_orth = noise_orth * (r_std / n_std)
+
+    # ---- (5) Combine
+    M_noisy = M_k + noise_orth
+    return M_k, noise_orth, M_noisy
+
+
+def add_orthogonal_noise_rankk_batched(M, rank=2, niter_svd=2, noise_scaling=1.0):
+    """
+    Batched version: M: (B, T, D)
+    For each b in [0..B-1], we:
+      1. rank-k SVD
+      2. get M_k
+      3. measure residual stats
+      4. create noise, remove top-k subspace
+      5. M_noisy = M_k + noise_orth
+    Returns: M_k, noise_orth, M_noisy => all shape (B, T, D).
+    """
+    B, T, D = M.shape
+    M_k_out = torch.empty_like(M)
+    noise_orth_out = torch.empty_like(M)
+    M_noisy_out = torch.empty_like(M)
+
+    for b_idx in range(B):
+        Mb = M[b_idx]  # shape (T, D)
+        # Single-matrix approach
+        Mk_b, noise_b, Mnoisy_b = add_orthogonal_noise_rankk(
+            Mb, rank=rank, niter_svd=niter_svd, noise_scaling=noise_scaling
+        )
+        M_k_out[b_idx] = Mk_b
+        noise_orth_out[b_idx] = noise_b
+        M_noisy_out[b_idx] = Mnoisy_b
+
+    return M_k_out, noise_orth_out, M_noisy_out
+
+
+def random_subspace_projection(values: torch.Tensor, rank: int = 2, add_noise_std=0.1):
+    B, T, D = values.shape
+    device, orig_dtype = values.device, values.dtype
+
+    # 1) Random subspace Q
+    R = torch.randn(D, rank, device=device, dtype=torch.float32)
+    Q, _ = torch.linalg.qr(R, mode="reduced")  # (D, k)
+    Q = Q.to(orig_dtype)
+
+    # 2) Project onto subspace
+    # vQ = (B,T,D) x (D,k) -> (B,T,k)
+    vQ = torch.matmul(values, Q)  # "batch matmul"
+    # v_proj = (B,T,k) x (k,D) -> (B,T,D)
+    v_proj = torch.matmul(vQ, Q.transpose(0, 1))
+
+    # 3) Orthogonal noise
+    noise = torch.randn_like(values) * add_noise_std
+    nQ = torch.matmul(noise, Q)  # (B, T, k)
+    n_proj = torch.matmul(nQ, Q.transpose(0, 1))  # (B, T, D)
+    noise_orth = noise - n_proj
+
+    # 4) Combine
+    values_new = v_proj + noise_orth
+
+    return values_new
+
+
+def value_svd_attention_wrapper(
+    rank: int = 1,
+    add_noise_std: float = 0.0,
+) -> callable:
+
+    def svd_attention(
+        q: Tensor,
+        k: Tensor,
+        values: Tensor,
+        extra_options,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        """
+        Randomly permute the values before computing attention.
+        """
+
+        if rank < 1:
+            return optimized_attention(q, k, torch.zeros_like(values), heads=heads)
+
+        orig_dtype = values.dtype
+        v_truncated, noise_orth, v_noisy = add_orthogonal_noise_rankk_batched(
+            values, niter_svd=3, rank=rank, noise_scaling=add_noise_std
+        )
+        new_v = v_noisy
+
+        return optimized_attention(q, k, new_v, heads=heads)
+
+    return svd_attention
+
+
+def random_subspace_projection_wrapper(
+    rank: int = 10, add_noise_std: float = 0.1
+) -> callable:
+    """
+    Wraps the random_subspace_projection function to be used as an attention function.
+    on the values
+
+    :param rank: Dimension of the random subspace.
+    :param add_noise_std: Standard deviation of the noise to be added orthogonally.
+    :return: Callable function for attention.
+    """
+
+    def random_subspace_attention(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        heads = extra_options["n_heads"]
+        new_v = random_subspace_projection(v, rank=rank, add_noise_std=add_noise_std)
+        return optimized_attention(q, k, new_v, heads=heads, mask=mask)
+
+    return random_subspace_attention
+
+
 def affine_attention_transform_wrapper(
     scaling_factor: float = 1.0,
     translation_factor: float = 0.0,
@@ -714,7 +876,6 @@ def affine_attention_transform_wrapper(
             q_mean = q.mean(dim=1, keepdim=True)
             new_q = new_q + mean_extrapolation_factor * q_mean
 
-        # Call your custom / optimized attention with the modified queries
         return optimized_attention(new_q, k, v, heads=heads, mask=mask)
 
     return random_drop_dual_perturbed_attention
@@ -748,7 +909,6 @@ def fuzzy_attention_wrapper(
             noise = torch.randn_like(new_v) * noise_std
             new_v += +noise
 
-        # Call your custom attention function with the transformed queries
         return optimized_attention(q, k, new_v, heads=heads, mask=mask)
 
     return fuzzy_attention
@@ -763,34 +923,126 @@ def random_drop_wrapper(
     Drop a random subset of the values before computing attention.
     """
 
-    def fuzzy_attention(
+    # def random_drop(
+    #     q: Tensor,
+    #     k: Tensor,
+    #     v: Tensor,
+    #     extra_options: dict,
+    #     mask=None,
+    # ) -> Tensor:
+    #     heads = extra_options["n_heads"]
+    #
+    #     b, t, d = v.shape
+    #     r = max(0, min(int(drop_percentage * t), t))
+    #     idx = torch.randperm(t, device=v.device)[:r]
+    #     # Generate random samples following the Gaussian distribution
+    #     # mean = v.mean(dim=1, keepdim=True)
+    #     # std = v.std(dim=1, keepdim=True)
+    #     std = v.std()
+    #     # mean = v.mean()
+    #     random_samples = replacement_std_mult * std * torch.randn_like(v)
+    #
+    #     # Replace the dropped values with the random samples
+    #     new_v = v.clone()
+    #     new_v[:, idx, :] = random_samples[:, idx, :]
+    #     new_v *= rescale
+    #
+    #     return optimized_attention(q, k, new_v, heads=heads, mask=mask)
+    def random_drop_orth(
         q: Tensor,
         k: Tensor,
         v: Tensor,
         extra_options: dict,
         mask=None,
     ) -> Tensor:
+        """
+        v: (B, T, D)  each item in the batch has T tokens, each token is D-dim.
+        We drop a random set of tokens (size ~ drop_percentage * T) per batch item.
+        Then we generate noise and remove the subspace spanned by the remain tokens.
+        """
         heads = extra_options["n_heads"]
+        B, T, D = v.shape
 
-        b, t, d = v.shape
-        r = max(0, min(int(drop_percentage * t), t))
-        idx = torch.randperm(t, device=v.device)[:r]
-        # Generate random samples following the Gaussian distribution
-        # mean = v.mean(dim=1, keepdim=True)
-        # std = v.std(dim=1, keepdim=True)
-        std = v.std()
-        mean = v.mean()
-        random_samples = mean + replacement_std_mult * std * torch.randn_like(v)
-
-        # Replace the dropped values with the random samples
+        # We'll build a new copy of v to modify
         new_v = v.clone()
-        new_v[:, idx, :] = random_samples[:, idx, :]
+
+        # For each batch item
+        for b_idx in range(B):
+            # 1) Decide which tokens to drop for this item
+            r = max(0, min(int(drop_percentage * T), T))
+            idx = torch.randperm(T, device=v.device)[:r]  # tokens to drop
+            remain_idx = torch.tensor(
+                list(set(range(T)) - set(idx.tolist())),
+                device=v.device,
+                dtype=torch.long,
+            )
+            remain_count = remain_idx.numel()
+
+            if remain_count == 0:
+                # Edge case: if everything got dropped, we can't build a subspace.
+                # Just fill noise (optionally do it isotropically).
+                noise_b = (
+                    replacement_std_mult
+                    * v.std()
+                    * torch.randn((r, D), device=v.device, dtype=v.dtype)
+                )
+                new_v[b_idx, idx, :] = noise_b
+                continue
+
+            # 2) Gather the remain vectors => shape (remain_count, D)
+            remain_v = new_v[b_idx, remain_idx, :]  # (remain_count, D)
+
+            dropped = new_v[b_idx, idx, :]
+            dropped_std = dropped.std()
+            noise_scale = replacement_std_mult * dropped_std
+            dropped_mean = dropped.mean()
+
+            # 3) Build subspace via QR on remain_v^T => shape (D, remain_count)
+            #    so that columns of Q are an orthonormal basis in R^D
+            M = remain_v.transpose(0, 1)  # shape (D, remain_count)
+            # If remain_count > D, we clamp remain_count to D to avoid errors
+            # Usually remain_count <= T, but T can be bigger than D or smaller, depends.
+            # We'll do 'reduced' mode
+            # But handle edge cases:
+            rcount = min(M.shape[1], M.shape[0])  # min(d, remain_count)
+            if rcount < 1:
+                # No subspace
+                # i.e. remain_count < 1 => all dropped
+                noise_b = noise_scale * torch.randn(
+                    (r, D), device=v.device, dtype=v.dtype
+                )
+                new_v[b_idx, idx, :] = noise_b
+                continue
+
+            # Possibly slice M if remain_count > D
+            M = M[:, :rcount]  # shape (D, rcount)
+            orig_dtype = M.dtype
+            Q, _ = torch.linalg.qr(
+                M.to(dtype=torch.float32), mode="reduced"
+            )  # Q: (D, rcount)
+            Q = Q.to(orig_dtype)
+
+            # 4) Generate random noise for the dropped tokens => shape (r, D)
+            noise_b = torch.randn((r, D), device=v.device, dtype=v.dtype)
+
+            # 5) Project out the subspace spanned by Q => noise_orth
+            #    noise_b: (r, D)
+            #    Q: (D, rcount)
+            # => noise_b @ Q: (r, rcount)
+            # => (noise_b @ Q) @ Q^T: (r, D) is the portion inside subspace
+            proj = (noise_b @ Q) @ Q.transpose(-2, -1)  # shape (r, D)
+            noise_orth = noise_b - proj
+            noise_orth *= noise_scale / noise_orth.std()
+            # noise_orth += dropped_mean
+
+            # 6) Insert into new_v
+            new_v[b_idx, idx, :] = noise_orth
+
         new_v *= rescale
 
-        # Call your custom attention function with the transformed queries
         return optimized_attention(q, k, new_v, heads=heads, mask=mask)
 
-    return fuzzy_attention
+    return random_drop_orth
 
 
 def upscale_and_transfer_previous_attention_wrapper(
