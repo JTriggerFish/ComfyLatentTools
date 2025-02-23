@@ -1,11 +1,7 @@
 import numpy as np
-import random
 
-import latent_filters
-from comfy.ldm.pixart.blocks import MultiHeadCrossAttention
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
-import kornia.geometry
 from torch import Tensor
 import torch
 import math
@@ -41,6 +37,7 @@ class GuidanceType(str, enum.Enum):
     RANDOM_DROP = "RandomDrop"
     RANDOM_SUBSPACE = "RandomSubspace"
     SVD = "SVD"
+    PHASE = "Phase"
     # DOWNSAMPLED = "Downsampled" # NOT IMPLEMENTED YET
     # DISTANCE_WEIGHTED = "DistanceWeighted" #NOT IMPLEMENTED YET
 
@@ -416,6 +413,148 @@ def seg_attention_wrapper(scaled_blur_sigma: float = 0.1) -> callable:
     return seg_perturbed_attention
 
 
+def fft_phase_shift_wrapper(
+    strength: float = 1.0,  # Overall scale for random phase (0..1 => up to 2pi*strength)
+    freq_tilt: float = 1.0,  # Tilt parameter in [-2,2] for low/high freq emphasis
+    per_frequency: bool = True,  # If True, each freq bin gets an independent random shift
+):
+    """
+    Returns an attention wrapper that:
+      1) Performs a 2D FFT over (T, D) in 'v'.
+      2) Applies a phase shift in the frequency domain.
+         - If per_frequency=True, each freq bin gets a random shift in [0..2*pi*strength],
+           *scaled* by a weighting that depends on freq_tilt.
+         - If per_frequency=False, we do a single global random shift but also
+           optionally apply an overall weighting factor (see note below).
+      3) Does the inverse FFT and passes the real part to attention.
+
+    Args:
+      strength: a float in [0..1 or bigger], controlling how large the max phase shift is
+                (random in [0, 2*pi*strength]).
+      per_frequency: if False, all freq bins get the *same* shift; if True, each bin differs.
+      freq_tilt: tilts the effect toward low or high freq.  0 => uniform.
+                 Positive => emphasize high freq, negative => emphasize low freq.
+
+    The weighting function for each frequency bin is determined by:
+      r = distance_from_center / max_dist, in [0, 1],
+      if freq_tilt > 0:   weight = r^(freq_tilt)
+      if freq_tilt < 0:   weight = (1 - r)^(-freq_tilt)
+      if freq_tilt = 0:   weight = 1
+
+    Then the random shift used at bin (fT,fD) is:
+        shift(fT,fD) = uniform(0, 2*pi*strength) * weight(fT,fD)
+
+    This can produce mild or strong emphasis on lower or higher frequencies.
+
+    NOTE: If per_frequency=False, by default we apply only a single phase shift
+          for the entire matrix.  freq_tilt does not strictly apply on a bin-by-bin
+          basis, so we skip that weighting or we do an average weighting approach.
+          See code comments.
+
+    Example usage:
+        attention_fn = fft_phase_shift_wrapper(strength=0.5, per_frequency=True, freq_tilt=1.5)
+
+    """
+
+    def fft_phase_shift(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        extra_options: dict,
+        mask=None,
+    ) -> Tensor:
+        original_dtype = v.dtype
+        v = v.to(torch.float32)
+        heads = extra_options["n_heads"]
+        B, T, D = v.shape
+
+        # 1) Compute 2D FFT across (T,D).
+        #    shape => (B, T, D), complex after fft2
+        v_fft = torch.fft.fft2(v, dim=(-2, -1))
+
+        # If we need bin-wise weighting, we first compute a frequency "distance" map r(fT,fD).
+        # We'll build a (T,D) map that says how far each freq bin is from DC in a normalized [0..1].
+        # Then define the weighting from freq_tilt.
+
+        # frequency coords in PyTorch typically go from 0..(T-1) for the vertical axis, 0..(D-1) for horizontal
+        # but for real interpretability, "DC" is at (0,0). We'll define symmetrical freq index about DC:
+        # freq_t = (i if i <= T//2 else i - T)  => in [-T/2.. T/2], similarly for freq_d in [-D/2.. D/2].
+        # Then r = sqrt(freq_t^2 + freq_d^2) / max_dist, with max_dist ~ sqrt((T/2)^2 + (D/2)^2).
+
+        # Let's build that map once. shape => (T, D)
+        freq_t = torch.fft.fftfreq(T, d=1.0).to(
+            v.device
+        )  # yields values in [-0.5..0.5) for T
+        freq_d = torch.fft.fftfreq(D, d=1.0).to(
+            v.device
+        )  # yields values in [-0.5..0.5) for D
+        # freq_t, freq_d each have shape (T,) or (D,). We'll do a meshgrid => shape (T, D)
+        fgrid_t, fgrid_d = torch.meshgrid(
+            freq_t, freq_d, indexing="ij"
+        )  # shape (T,D), (T,D)
+
+        # magnitude r in [0.. ~0.707 if T=D, but let's treat it as 0..1 by normalizing
+        # We'll do r = sqrt(t^2 + d^2) / 0.5*sqrt(2) => roughly in [0..1.414], we can clamp to [0..1]
+        # Actually let's define r = sqrt(t^2 + d^2) * 2 => that yields range up to ~1 if T,D large
+        # For simplicity, let's do:
+        r = (
+            torch.sqrt(fgrid_t**2 + fgrid_d**2) * 2.0
+        )  # shape (T,D). Typically up to ~1.414 if T,D big.
+        r = torch.clamp(r, 0.0, 1.0)  # clamp to [0,1] just in case
+
+        # define weighting from freq_tilt
+        # if freq_tilt>0 => weight = r^(freq_tilt)
+        # if freq_tilt<0 => weight = (1-r)^(-freq_tilt)
+        # if freq_tilt=0 => weight = 1
+        if freq_tilt > 0:
+            weight_2d = r ** (freq_tilt)
+        elif freq_tilt < 0:
+            neg_tilt = -freq_tilt
+            weight_2d = (1.0 - r) ** (neg_tilt)
+        else:
+            weight_2d = torch.ones_like(r)
+
+        if per_frequency:
+            # 2a) Each freq bin => random phase in [0.. 2*pi*strength * weight_2d].
+            # We'll draw uniform(0..1) => multiply by 2*pi*strength*weight.
+            # shape (T, D)
+            rand_factor_2d = torch.rand((T, D), device=v.device)  # in [0,1]
+            # final max shift for bin (t,d)
+            phi_2d = rand_factor_2d * (2 * math.pi * strength) * weight_2d
+
+            # multiply v_fft by e^(i phi_2d)
+            shift_factor_2d = torch.exp(1j * phi_2d)
+            # broadcast to (B, T, D) => multiply
+            shift_factor_2d = shift_factor_2d.unsqueeze(0)
+            v_fft = v_fft * shift_factor_2d
+
+        else:
+            # single global shift => we pick one random phi in [0..2*pi*strength]
+            # Then possibly apply a weighting factor if you want partial offset
+            # But typically if we only do a single shift, freq_tilt doesn't have a direct meaning
+            # because there's no "per-frequency" difference.
+            # We might do an "average" weighting or a "max" weighting. Let's do a simple approach:
+
+            # average weighting across freq bins => mean(weight_2d). We'll interpret that
+            # as how big a typical shift is.
+            avg_w = weight_2d.mean()
+            phi = torch.rand((), device=v.device) * (2 * math.pi * strength * avg_w)
+            shift_factor = torch.exp(1j * phi)
+            v_fft = v_fft * shift_factor
+
+        # 3) Inverse FFT
+        v_ifft = torch.fft.ifft2(v_fft, dim=(-2, -1))
+        v_perturbed = v_ifft.real  # keep real part
+
+        # restore original dtype
+        v_perturbed = v_perturbed.to(original_dtype)
+
+        # 4) Pass to attention
+        return optimized_attention(q, k, v_perturbed, heads=heads, mask=mask)
+
+    return fft_phase_shift
+
+
 def scramble_attention_wrapper(
     set_size: float = 1, value_scaling: float = 1.0
 ) -> callable:
@@ -649,8 +788,8 @@ def add_orthogonal_noise_rankk(M, rank=2, niter_svd=2, noise_scaling=1.0):
     T, D = M.shape
 
     # ---- (1) SVD for rank-k
-    U, S, V = rank_k_svd_approx(M, k=rank, niter=niter_svd)
-    # U, S, V = rank_k_svd_approx_full(M, k=rank)
+    # U, S, V = rank_k_svd_approx(M, k=rank, niter=niter_svd)
+    U, S, V = rank_k_svd_approx_full(M, k=rank)
     # Reconstruct rank-k portion: M_k = U * diag(S) * V^T
     # We'll do (U * S) => (T, k), then matmul with V^T => (T, D)
     M_k = (U * S) @ V.transpose(-2, -1)
@@ -713,7 +852,7 @@ def add_orthogonal_noise_rankk_batched(M, rank=2, niter_svd=2, noise_scaling=1.0
     return M_k_out, noise_orth_out, M_noisy_out
 
 
-def random_subspace_projection(values: torch.Tensor, rank: int = 2, add_noise_std=0.1):
+def random_subspace_projection(values: torch.Tensor, rank: int = 2, add_noise_mult=1.0):
     B, T, D = values.shape
     device, orig_dtype = values.device, values.dtype
 
@@ -728,11 +867,15 @@ def random_subspace_projection(values: torch.Tensor, rank: int = 2, add_noise_st
     # v_proj = (B,T,k) x (k,D) -> (B,T,D)
     v_proj = torch.matmul(vQ, Q.transpose(0, 1))
 
+    residual = values - v_proj
+    residual_std = residual.std(unbiased=False)
+
     # 3) Orthogonal noise
-    noise = torch.randn_like(values) * add_noise_std
+    noise = torch.randn_like(values)
     nQ = torch.matmul(noise, Q)  # (B, T, k)
     n_proj = torch.matmul(nQ, Q.transpose(0, 1))  # (B, T, D)
     noise_orth = noise - n_proj
+    noise_orth *= residual_std * add_noise_mult / noise_orth.std(unbiased=False)
 
     # 4) Combine
     values_new = v_proj + noise_orth
@@ -772,7 +915,7 @@ def value_svd_attention_wrapper(
 
 
 def random_subspace_projection_wrapper(
-    rank: int = 10, add_noise_std: float = 0.1
+    rank: int = 10, add_noise_mult: float = 1.0
 ) -> callable:
     """
     Wraps the random_subspace_projection function to be used as an attention function.
@@ -791,7 +934,7 @@ def random_subspace_projection_wrapper(
         mask=None,
     ) -> Tensor:
         heads = extra_options["n_heads"]
-        new_v = random_subspace_projection(v, rank=rank, add_noise_std=add_noise_std)
+        new_v = random_subspace_projection(v, rank=rank, add_noise_mult=add_noise_mult)
         return optimized_attention(q, k, new_v, heads=heads, mask=mask)
 
     return random_subspace_attention

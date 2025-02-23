@@ -199,14 +199,16 @@ class GenericAttentionGuidance:
             # )
 
             if apply_cosine_schedule_to_guidance:
-                # cosine_schedule = 1 - 0.5 * (
-                #     1 + np.cos(np.pi * current_step / total_steps)
-                # )
+                cosine_schedule = 1 - 0.5 * (
+                    1 + np.cos(np.pi * current_step / total_steps)
+                )
                 # guidance_w = guidance_weight * cosine_schedule
                 guidance_w = guidance_weight * exp_linear_schedule(
-                    current_step, total_steps, alpha=10
+                    current_step, total_steps, alpha=5
                 )
-                # guidance_w = guidance_weight * float(sigmas[0] - sigma)
+                guidance_w = guidance_weight * float(
+                    torch.sqrt(sigmas[0] ** 2 - sigma**2) / sigmas[0]
+                )
             else:
                 guidance_w = guidance_weight
 
@@ -255,6 +257,8 @@ class GenericAttentionGuidance:
                         attention_fn = guidance.random_subspace_projection_wrapper(
                             max(0, int(param1)), param2
                         )
+                    case guidance.GuidanceType.PHASE:
+                        attention_fn = guidance.fft_phase_shift_wrapper(param1, param2)
                     case _:
                         raise ValueError(f"Unsupported guidance type: {guidance_type}")
 
