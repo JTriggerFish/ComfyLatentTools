@@ -1,7 +1,7 @@
 import numpy as np
 import random
 
-import latent_filters
+from .latent_filters import *
 from comfy.ldm.pixart.blocks import MultiHeadCrossAttention
 from comfy.model_patcher import ModelPatcher, set_model_options_patch_replace
 from comfy.samplers import calc_cond_batch
