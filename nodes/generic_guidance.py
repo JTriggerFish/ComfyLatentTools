@@ -80,29 +80,25 @@ class GenericAttentionGuidance:
                 ),
                 "unet_block": (["input", "middle", "output"], {"default": "middle"}),
                 "unet_block_id": ("INT", {"default": 0}),
-                "noise_fraction_start": (
+                "guidance_start_sigma": (
                     "FLOAT",
                     {
-                        "default": 1.0,
+                        "default": 7.0,
                         "min": 0.0,
-                        "max": 1.0,
+                        "max": 15.0,
                         "step": 0.01,
                         "round": False,
                     },
                 ),
-                "noise_fraction_end": (
+                "guidance_end_sigma": (
                     "FLOAT",
                     {
                         "default": 0.0,
                         "min": 0.0,
-                        "max": 1.0,
+                        "max": 15.0,
                         "step": 0.01,
                         "round": False,
                     },
-                ),
-                "apply_cosine_schedule_to_guidance": (
-                    "BOOLEAN",
-                    {"default": False},
                 ),
                 "time_perturbation_std": (
                     "FLOAT",
@@ -142,17 +138,18 @@ class GenericAttentionGuidance:
         rescaling_fraction: float = 0.7,
         unet_block: str = "middle",
         unet_block_id: int = 0,
-        noise_fraction_start: float = 1.0,
-        noise_fraction_end: float = 0.0,
-        apply_cosine_schedule_to_guidance: bool = False,
+        guidance_start_sigma: float = 7.0,
+        guidance_end_sigma: float = 0.0,
         time_perturbation_std: float = 0.05,
         unet_block_list: str = "",
     ):
         """
 
+        :param guidance_end_sigma:
+        :param guidance_start_sigma:
         :param model:
         :param guidance_type:
-        :param guidance_weight: Recommeded around 2.0
+        :param guidance_weight: Recommended around 2.0
         :param param1: 1.0 for most
         :param param2: -100 for AAT, 0 to 1 for RandomRotation
         :param param3:
@@ -194,29 +191,18 @@ class GenericAttentionGuidance:
             current_step = torch.argmin(torch.abs(sigmas - sigma)).item()
             total_steps = len(sigmas)
 
-            # guidance_schedule_weight = 1 - exp_linear_schedule(
-            #     current_step, total_steps, alpha=-3
-            # )
+            guidance_w = (
+                guidance_weight
+                if ((sigma >= guidance_end_sigma) and (sigma <= guidance_start_sigma))
+                else 0.0
+            )
+            cond_scale = (
+                cond_scale
+                if ((sigma >= guidance_end_sigma) and (sigma <= guidance_start_sigma))
+                else 1.0
+            )
 
-            if apply_cosine_schedule_to_guidance:
-                cosine_schedule = 1 - 0.5 * (
-                    1 + np.cos(np.pi * current_step / total_steps)
-                )
-                # guidance_w = guidance_weight * cosine_schedule
-                guidance_w = guidance_weight * exp_linear_schedule(
-                    current_step, total_steps, alpha=5
-                )
-                guidance_w = guidance_weight * float(
-                    torch.sqrt(sigmas[0] ** 2 - sigma**2) / sigmas[0]
-                )
-            else:
-                guidance_w = guidance_weight
-
-            if (
-                (current_frac > noise_fraction_start)
-                or (current_frac <= noise_fraction_end)
-                or abs(guidance_w) < 1e-6
-            ):
+            if abs(guidance_w) < 1e-6:
                 # Skip
                 alternate_cond_pred = cond_pred
             else:

@@ -49,6 +49,7 @@ class GuidanceScalingMethod(str, enum.Enum):
     SNF = "SNF"
     SOFTMAX = "Softmax"
     NORMALIZE = "Normalize"
+    ORTHOGONAL_COMPONENT = "OrthogonalComponent"
 
 
 def plain_guidance_combine(
@@ -192,6 +193,59 @@ def pred_rescaled_guidance_combine(
         return base_guidance + guidance_adj
 
 
+def orthogonal_component_guidance_combine(
+    cond_pred: Tensor,
+    uncond_pred: Tensor,
+    cfg: float,
+    alternate_pred: Tensor | None,
+    alternate_pred_ref: Tensor | None,
+    alternate_guidance_weight: float,
+    apply_rescaling_to_guidance: bool,
+    rescaling_fraction: float,
+) -> Tensor:
+    """
+    Note this operates in the prediction space, not the V-space
+    :param cond_pred:
+    :param uncond_pred:
+    :param cfg:
+    :param alternate_pred:
+    :param alternate_pred_ref:
+    :param alternate_guidance_weight:
+    :param apply_rescaling_to_guidance:
+    :param rescaling_fraction:
+    :return:
+    """
+    base = cond_pred
+    normalized_base = F.normalize(base, p=2, dim=(-1, -2, -3))
+    cfg_adj = max(cfg - 1, 0) * (cond_pred - uncond_pred)
+
+    if alternate_pred is None:
+        guidance_adj = 0
+    else:
+        if alternate_pred_ref is None:
+            alternate_pred_ref = 0
+        guidance_adj = alternate_guidance_weight * (alternate_pred_ref - alternate_pred)
+
+    if apply_rescaling_to_guidance:
+        total_adj = cfg_adj + guidance_adj
+        adj_projection = (total_adj * normalized_base).sum(
+            dim=(-1, -2, -3), keepdim=True
+        ) * normalized_base
+        orthogonal_component = total_adj - adj_projection
+        return base + orthogonal_component + (1 - rescaling_fraction) * adj_projection
+    else:
+        cfg_projection = (cfg_adj * normalized_base).sum(
+            dim=(-1, -2, -3), keepdim=True
+        ) * normalized_base
+        cfg_orthogonal_component = cfg_adj - cfg_projection
+        return (
+            base
+            + cfg_orthogonal_component
+            + (1 - rescaling_fraction) * cfg_projection
+            + guidance_adj
+        )
+
+
 def v_space_rescaled_guidance_combine(
     x: Tensor,
     sigma: Tensor,
@@ -319,6 +373,17 @@ def guidance_combine_and_scale(
             )
         case GuidanceScalingMethod.NORMALIZE:
             return guidance_normalize(
+                cond_pred,
+                uncond_pred,
+                cfg,
+                alternate_pred,
+                alternate_pred_ref,
+                alternate_guidance_weight,
+                apply_rescaling_to_guidance,
+                rescaling_fraction,
+            )
+        case GuidanceScalingMethod.ORTHOGONAL_COMPONENT:
+            return orthogonal_component_guidance_combine(
                 cond_pred,
                 uncond_pred,
                 cfg,
