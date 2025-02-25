@@ -948,35 +948,127 @@ def random_subspace_projection(values: torch.Tensor, rank: int = 2, add_noise_mu
     return values_new
 
 
-def value_svd_attention_wrapper(
-    rank: int = 1,
-    add_noise_std: float = 0.0,
+def svd_perturb_per_head_wrapper(
+    rank: int, noise_scale: float = 1.0, low_rank_approx: bool = False, niter: int = 3
 ) -> callable:
+    """
+    A function that modifies 'v' (B, T, D) by:
+      1) Splitting D -> nHeads x embedDim,
+      2) For each batch item b:
+         - reshape => (nHeads, T, embedDim)
+         - center, run batched SVD in float32
+         - compute rank-k approx => X_approx
+         - measure residual R = X - X_approx, get its std
+         - sample random noise => noise_orth, re-scale to match R's std * noise_scale
+         - X_new = X_approx + noise_orth + mean
+      3) reshape back => (T, D)
+      4) cast to the original dtype
+      5) call attention with updated v
+    Args:
+      rank: how many principal directions to keep in the embedding dimension
+      n_heads: number of attention heads (D must be divisible by n_heads).
+      noise_scale: factor to scale the matched orth noise distribution by.
+                   1 => same std as original residual, <1 => smaller, >1 => larger.
+    """
 
-    def svd_attention(
-        q: Tensor,
-        k: Tensor,
-        values: Tensor,
-        extra_options,
-        mask=None,
+    def svd_perturb_per_head(
+        q: Tensor, k: Tensor, v: Tensor, extra_options: dict, mask=None
     ) -> Tensor:
-        heads = extra_options["n_heads"]
         """
-        Randomly permute the values before computing attention.
+        v: shape (B, T, D), likely float16 (fp16). We'll do:
+         - store v's dtype
+         - cast to float32 for SVD
+         - do rank-k approx per-head
+         - match the residual's std in the orth subspace * noise_scale
+         - reshape & cast back
+         - call attention
         """
+        original_dtype = v.dtype
+        n_heads = extra_options["n_heads"]
 
-        if rank < 1:
-            return optimized_attention(q, k, torch.zeros_like(values), heads=heads)
+        B, T, D = v.shape
+        if D % n_heads != 0:
+            raise ValueError(f"Dimension D={D} not divisible by n_heads={n_heads}")
 
-        orig_dtype = values.dtype
-        v_truncated, noise_orth, v_noisy = add_orthogonal_noise_rankk_batched(
-            values, niter_svd=3, rank=rank, noise_scaling=add_noise_std
-        )
-        new_v = v_noisy
+        embed_dim = D // n_heads
 
-        return optimized_attention(q, k, new_v, heads=heads)
+        # We'll modify a copy of v, but do SVD in float32
+        v_new = v.clone()
 
-    return svd_attention
+        for b_idx in range(B):
+            # 1) slice out (T,D) for this batch item, cast to float32
+            M_b = v_new[b_idx].to(torch.float32)  # shape (T, D)
+
+            # 2) reshape => (nHeads, T, embedDim)
+            X_4d = M_b.view(T, n_heads, embed_dim)  # (T, nHeads, E)
+            X_4d = X_4d.permute(1, 0, 2).contiguous()  # (nHeads, T, E)
+
+            # center along tokens dimension => mean shape (nHeads,1,E)
+            mean_ = X_4d.mean(dim=1, keepdim=True)
+            # mean_ = 0  # Assume zero mean
+            X_centered = X_4d - mean_
+
+            # 3) run batched SVD => shape => (nHeads, T, E)
+            #    U: (nHeads, T, E), S: (nHeads, min(T,E)), Vh: (nHeads, E, E)
+            if not low_rank_approx:
+                U, S, Vh = torch.linalg.svd(X_centered, full_matrices=False)
+                topV = Vh[:, :rank, :].transpose(-2, -1).contiguous()
+            else:
+                U, S, Vh = torch.svd_lowrank(X_centered, q=rank, niter=niter)
+                topV = Vh  # When using torch.svd_lowrank, Vh is already rank-k
+
+            # helper to project onto subspace spanned by topV
+            def project_onto_subspace(X, basis):
+                # X: (nHeads, T, E)
+                # basis: (nHeads, E, rank)
+                # => (X @ basis): (nHeads, T, rank)
+                # => multiply again => (nHeads, T, E)
+                Xproj = torch.matmul(X, basis)  # (nHeads,T,rank)
+                return torch.matmul(Xproj, basis.transpose(-2, -1))  # (nHeads,T,E)
+
+            # 5) build rank-k approx
+            X_approx = project_onto_subspace(X_centered, topV)
+
+            # 6) measure residual => R = X_centered - X_approx
+            R = X_centered - X_approx
+            # => shape (nHeads, T, E)
+            # measure std along (T,E), leaving nHeads dimension => shape (nHeads,1,1)
+            R_std = R.flatten(1).std(dim=1, unbiased=False).unsqueeze(-1).unsqueeze(-1)
+
+            # 7) sample random noise => shape (nHeads, T, E)
+            noise = torch.randn_like(X_centered)
+
+            # project out rank-k subspace => noise_orth
+            noise_proj = project_onto_subspace(noise, topV)
+            noise_orth = noise - noise_proj
+
+            # moment match: we want final noise_orth to have std = R_std * noise_scale
+            # => measure current noise_orth std => shape (nHeads,1,1)
+            n_orth_std = (
+                noise_orth.flatten(1)
+                .std(dim=1, unbiased=False)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+            )
+            # scale factor
+            scale_factor = (R_std * noise_scale) / (n_orth_std + 1e-12)
+            noise_orth = noise_orth * scale_factor
+
+            # final => X_new = X_approx + noise_orth + mean
+            X_new = X_approx + noise_orth
+            X_new = X_new + mean_
+
+            # reshape back => (nHeads, T, E) -> (T, nHeads, E) -> (T,D)
+            X_new = X_new.permute(1, 0, 2).contiguous()  # (T, nHeads, E)
+            M_new = X_new.view(T, n_heads * embed_dim)  # (T, D)
+
+            # store => cast back to original dtype
+            v_new[b_idx] = M_new.to(original_dtype)
+
+        # call attention
+        return optimized_attention(q, k, v_new, heads=n_heads, mask=mask)
+
+    return svd_perturb_per_head
 
 
 def random_subspace_projection_wrapper(

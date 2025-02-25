@@ -1,4 +1,3 @@
-from comfy.ldm.flux.math import attention
 from comfy.model_patcher import ModelPatcher
 from comfy.samplers import calc_cond_batch
 from ..core import guidance as guidance
@@ -120,6 +119,7 @@ class GenericAttentionGuidance:
     FUNCTION = "patch"
     CATEGORY = "model_patches/unet"
     OUTPUT_NODE = False
+    EXPERIMENTAL = True
 
     @classmethod
     def help(cls):
@@ -179,6 +179,10 @@ class GenericAttentionGuidance:
             cond_pred = args["cond_denoised"]  # x_0
             uncond_pred = args["uncond_denoised"]
             cond_scale = args["cond_scale"]
+
+            # if cond_scale != 1.0:
+            #     raise ValueError("CFG must be set to 1.0")
+
             cond = args["cond"]
             uncond = args["uncond"]
             sigma = args["sigma"]
@@ -236,7 +240,7 @@ class GenericAttentionGuidance:
                             param1, param2, param3
                         )
                     case guidance.GuidanceType.SVD:
-                        attention_fn = guidance.value_svd_attention_wrapper(
+                        attention_fn = guidance.svd_perturb_per_head_wrapper(
                             max(0, int(param1)), param2
                         )
                     case guidance.GuidanceType.RANDOM_SUBSPACE:
