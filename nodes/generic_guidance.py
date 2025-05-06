@@ -186,23 +186,33 @@ class GenericAttentionGuidance:
             cond = args["cond"]
             uncond = args["uncond"]
             sigma = args["sigma"]
+            sigma_0 = float(sigma[0])
+            # Check all sigmas are the same
+            if not torch.allclose(sigma, sigma[0]):
+                raise ValueError("All sigmas must be the same")
             model_options = args["model_options"]
             x = args["input"]
 
             sigmas = model_options["transformer_options"]["sample_sigmas"]
 
-            current_frac = sigma**2 / sigmas[0] ** 2
-            current_step = torch.argmin(torch.abs(sigmas - sigma)).item()
-            total_steps = len(sigmas)
+            # current_frac = sigma**2 / sigmas[0] ** 2
+            # current_step = torch.argmin(torch.abs(sigmas - sigma)).item()
+            # total_steps = len(sigmas)
 
             guidance_w = (
                 guidance_weight
-                if ((sigma >= guidance_end_sigma) and (sigma <= guidance_start_sigma))
+                if (
+                    (sigma_0 >= guidance_end_sigma)
+                    and (sigma_0 <= guidance_start_sigma)
+                )
                 else 0.0
             )
             cond_scale = (
                 cond_scale
-                if ((sigma >= guidance_end_sigma) and (sigma <= guidance_start_sigma))
+                if (
+                    (sigma_0 >= guidance_end_sigma)
+                    and (sigma_0 <= guidance_start_sigma)
+                )
                 else 1.0
             )
 
